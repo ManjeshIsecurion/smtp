@@ -2,4 +2,3 @@ pulumi
 pulumi-command
 requests
 ovh
-EOF
