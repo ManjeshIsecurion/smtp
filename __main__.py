@@ -194,7 +194,7 @@ write_keytable = put(
 # ---------------------------------------------------------------------------
 
 # ---> FIXED: Removed '*@' pattern to avoid regex compilation mismatches <---
-signingtable_content = f"{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
+signingtable_content = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
 
 write_signingtable = put(
     "write_signingtable",
@@ -224,7 +224,7 @@ UserID opendkim
 PidFile /run/opendkim/opendkim.pid
 
 KeyTable file:/etc/opendkim/KeyTable
-SigningTable file:/etc/opendkim/SigningTable
+SigningTable refile:/etc/opendkim/SigningTable
 ExternalIgnoreList /etc/opendkim/TrustedHosts
 InternalHosts /etc/opendkim/TrustedHosts
 """.strip(),
