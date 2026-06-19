@@ -2,10 +2,9 @@ import os
 import re
 import base64
 import requests
-import subprocess
+
 import pulumi
 import pulumi_command as command
-
 
 # ---------------------------------------------------------------------------
 # Pulumi Config
@@ -17,7 +16,7 @@ GODADDY_API_KEY = cfg.require("godaddyApiKey")
 GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
 
 # ---------------------------------------------------------------------------
-# Server Config
+# Server & Domain Config
 # ---------------------------------------------------------------------------
 
 def get_public_ip():
@@ -47,10 +46,12 @@ def get_primary_domain():
 
 PRIMARY_DOMAIN = get_primary_domain()
 
-DOMAINS_FILE = "/home/ubuntu/domains.txt"
+
+# ---> FIXED: Target Domain set to your live production domain <---
+TARGET_DOMAIN = cfg.require("domain")
 
 # ---------------------------------------------------------------------------
-# Local Password Storage (NEW)
+# Local Password Storage
 # ---------------------------------------------------------------------------
 
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
@@ -62,34 +63,11 @@ def generate_password(length=24):
     chars = string.ascii_letters + string.digits + "!@#$%^&*()-_"
     return "".join(secrets.choice(chars) for _ in range(length))
 
-# ---------------------------------------------------------------------------
-# Read Domains From domains.txt
-# ---------------------------------------------------------------------------
-
-if not os.path.exists(DOMAINS_FILE):
-    with open(DOMAINS_FILE, "w") as f:
-        pass
-
-domains = set()
-domain_users = {}
-domain_passwords = {}
-
-with open(DOMAINS_FILE, "r") as f:
-    for line in f:
-        domain = line.strip()
-
-        if not domain:
-            continue
-
-        domains.add(domain)
-
-        username = re.sub(r"\..*$", "", domain)
-        domain_users[domain] = username
-
-DOMAINS = sorted(domains)
+# Parse the single domain username
+DOMAIN_USER = re.sub(r"\..*$", "", TARGET_DOMAIN)
 
 # ---------------------------------------------------------------------------
-# Generate / Load Passwords
+# Generate / Load Password for Single Domain
 # ---------------------------------------------------------------------------
 
 existing_passwords = {}
@@ -101,35 +79,23 @@ if os.path.exists(PASSWORD_FILE):
                 d, p = line.strip().split(":", 1)
                 existing_passwords[d] = p
 
-for domain in DOMAINS:
-    if domain in existing_passwords:
-        domain_passwords[domain] = existing_passwords[domain]
-    else:
-        domain_passwords[domain] = generate_password()
+# Assign or generate password
+if TARGET_DOMAIN in existing_passwords:
+    DOMAIN_PASSWORD = existing_passwords[TARGET_DOMAIN]
+else:
+    DOMAIN_PASSWORD = generate_password()
 
 # Save back to file
 with open(PASSWORD_FILE, "w") as f:
-    for domain in DOMAINS:
-        f.write(f"{domain}:{domain_passwords[domain]}\n")
+    f.write(f"{TARGET_DOMAIN}:{DOMAIN_PASSWORD}\n")
 
-print("Passwords generated/stored in:", PASSWORD_FILE)
+print("Password generated/stored in:", PASSWORD_FILE)
 
 # ---------------------------------------------------------------------------
 # Generate Dovecot Password File
 # ---------------------------------------------------------------------------
 
-dovecot_users = []
-
-for domain in DOMAINS:
-
-    username = domain_users[domain]
-    password = domain_passwords[domain]
-
-    dovecot_users.append(
-        f"{username}:{password}"
-    )
-
-dovecot_users_content = "\n".join(dovecot_users)
+dovecot_users_content = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,6 +140,7 @@ write_dovecot_users = put(
     owner="root:root",
     mode="644",
 )
+
 # ---------------------------------------------------------------------------
 # OpenDKIM Directories
 # ---------------------------------------------------------------------------
@@ -195,12 +162,10 @@ trusted_hosts = [
     "127.0.0.1",
     "localhost",
     VPS_IP,
+    TARGET_DOMAIN,
+    f"*.{TARGET_DOMAIN}",
+    f"mail.{TARGET_DOMAIN}"
 ]
-
-for domain in DOMAINS:
-    trusted_hosts.append(domain)
-    trusted_hosts.append(f"*.{domain}")
-    trusted_hosts.append(f"mail.{domain}")
 
 trustedhosts_content = "\n".join(trusted_hosts)
 
@@ -208,19 +173,14 @@ write_trustedhosts = put(
     "write_trustedhosts",
     "/etc/opendkim/TrustedHosts",
     trustedhosts_content,
-    deps=[create_opendkim_dirs,write_dovecot_users],
+    deps=[create_opendkim_dirs, write_dovecot_users],
 )
 
 # ---------------------------------------------------------------------------
 # KeyTable
 # ---------------------------------------------------------------------------
 
-keytable_content = "\n".join(
-    [
-        f"mail._domainkey.{domain} {domain}:mail:/etc/opendkim/keys/{domain}/mail.private"
-        for domain in DOMAINS
-    ]
-)
+keytable_content = f"mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/opendkim/keys/{TARGET_DOMAIN}/mail.private"
 
 write_keytable = put(
     "write_keytable",
@@ -233,12 +193,8 @@ write_keytable = put(
 # SigningTable
 # ---------------------------------------------------------------------------
 
-signingtable_content = "\n".join(
-    [
-        f"*@{domain} mail._domainkey.{domain}"
-        for domain in DOMAINS
-    ]
-)
+# ---> FIXED: Removed '*@' pattern to avoid regex compilation mismatches <---
+signingtable_content = f"{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
 
 write_signingtable = put(
     "write_signingtable",
@@ -251,6 +207,7 @@ write_signingtable = put(
 # Config DKIM Keys
 # ------------------------------------------------------------->
 
+# ---> FIXED: Table lines changed from 'refile:' to explicit 'file:' <---
 write_opendkim_conf = put(
     "write_opendkim_conf",
     "/etc/opendkim.conf",
@@ -261,13 +218,13 @@ UMask 002
 
 Canonicalization relaxed/simple
 Mode sv
-Socket inet:8891@localhost
+Socket inet:8891@127.0.0.1
 
 UserID opendkim
 PidFile /run/opendkim/opendkim.pid
 
-KeyTable /etc/opendkim/KeyTable
-SigningTable refile:/etc/opendkim/SigningTable
+KeyTable file:/etc/opendkim/KeyTable
+SigningTable file:/etc/opendkim/SigningTable
 ExternalIgnoreList /etc/opendkim/TrustedHosts
 InternalHosts /etc/opendkim/TrustedHosts
 """.strip(),
@@ -281,8 +238,8 @@ configure_postfix_milter = run(
     """
 sudo postconf -e "milter_protocol = 6"
 sudo postconf -e "milter_default_action = accept"
-sudo postconf -e "smtpd_milters = inet:localhost:8891"
-sudo postconf -e "non_smtpd_milters = inet:localhost:8891"
+sudo postconf -e "smtpd_milters = inet:127.0.0.1:8891"
+sudo postconf -e "non_smtpd_milters = inet:127.0.0.1:8891"
 sudo systemctl restart postfix
 """,
     deps=[write_opendkim_conf],
@@ -292,62 +249,45 @@ sudo systemctl restart postfix
 # Generate DKIM Keys
 # ---------------------------------------------------------------------------
 
-dkim_commands = []
+dkim_command = f"""
+sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
+sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
+sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
 
-for domain in DOMAINS:
-    dkim_commands.append(
-        f"""
-if [ ! -f /etc/opendkim/keys/{domain}/mail.txt ]; then
-
-    sudo mkdir -p /etc/opendkim/keys/{domain}
-
-    # Correct ownership BEFORE key generation
-    sudo chown opendkim:opendkim /etc/opendkim/keys/{domain}
-    sudo chmod 700 /etc/opendkim/keys/{domain}
-
-    # Generate DKIM key (FIXED LINE CONTINUATION)
-    sudo opendkim-genkey \
-        -b 2048 \
-        -D /etc/opendkim/keys/{domain} \
-        -s mail \
-        -d {domain}
-
-    # Ensure correct ownership AFTER generation
-    sudo chown opendkim:opendkim /etc/opendkim/keys/{domain}/mail.private
-    sudo chmod 600 /etc/opendkim/keys/{domain}/mail.private
-
-    sudo chown opendkim:opendkim /etc/opendkim/keys/{domain}/mail.txt
-    sudo chmod 644 /etc/opendkim/keys/{domain}/mail.txt
-
+if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ]; then
+    sudo opendkim-genkey -b 2048 -D /etc/opendkim/keys/{TARGET_DOMAIN} -s mail -d {TARGET_DOMAIN}
 fi
+
+sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
+sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
+sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """
-    )
 
 generate_dkim = run(
     "generate_dkim",
-    "\n".join(dkim_commands),
+    dkim_command,
     deps=[
         write_trustedhosts,
         write_keytable,
         write_signingtable,
     ],
 )
+
 # ---------------------------------------------------------------------------
-# Read All DKIM Public Keys
+# Read DKIM Public Key
 # ---------------------------------------------------------------------------
 
 read_all_dkim = command.local.Command(
     "read_all_dkim",
-    create="""
-for d in $(ls /etc/opendkim/keys); do
-    echo "=====DOMAIN:$d====="
-    cat /etc/opendkim/keys/$d/mail.txt
-done
+    create=f"""
+echo "=====DOMAIN:{TARGET_DOMAIN}====="
+sudo cat /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """,
     opts=pulumi.ResourceOptions(
         depends_on=[generate_dkim]
     ),
 )
+
 # ---------------------------------------------------------------------------
 # GoDaddy Helpers
 # ---------------------------------------------------------------------------
@@ -368,203 +308,85 @@ def update_record(
     value,
     ttl=600,
 ):
-    url = (
-        f"https://api.godaddy.com/v1/domains/"
-        f"{domain}/records/{record_type}/{name}"
-    )
+    url = f"https://api.godaddy.com/v1/domains/{domain}/records/{record_type}/{name}"
 
     response = requests.put(
         url,
         headers=godaddy_headers(secret),
-        json=[
-            {
-                "data": value,
-                "ttl": ttl,
-            }
-        ],
+        json=[{"data": value, "ttl": ttl}],
         timeout=60,
     )
-
-    print(
-        f"{domain} {record_type} {name}: "
-        f"{response.status_code}"
-    )
-
+    print(f"{domain} {record_type} {name}: {response.status_code}")
     response.raise_for_status()
 
 
-def update_mx_record(
-    secret,
-    domain,
-):
-    url = (
-        f"https://api.godaddy.com/v1/domains/"
-        f"{domain}/records/MX/@"
-    )
+def update_mx_record(secret, domain):
+    url = f"https://api.godaddy.com/v1/domains/{domain}/records/MX/@"
 
     response = requests.put(
         url,
         headers=godaddy_headers(secret),
-        json=[
-            {
-                "data": f"mail.{domain}",
-                "priority": 10,
-                "ttl": 600,
-            }
-        ],
+        json=[{"data": f"mail.{domain}", "priority": 10, "ttl": 600}],
         timeout=60,
     )
-
-    print(
-        f"{domain} MX: "
-        f"{response.status_code}"
-    )
-
+    print(f"{domain} MX: {response.status_code}")
     response.raise_for_status()
 
 
 pulumi.export(
     "mail_users",
     {
-        domain: {
-            "username": domain_users[domain],
-            "password": domain_passwords[domain],
-        }
-        for domain in DOMAINS
+        TARGET_DOMAIN: {
+            "username": DOMAIN_USER,
+            "password": DOMAIN_PASSWORD,
+            }
     },
 )
 
 # ---------------------------------------------------------------------------
 # DNS Update
-# -------------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def update_dns(secret):
+    txt_path = f"/etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt"
 
-    for domain in DOMAINS:
+    import subprocess
 
-        txt_path = (
-            f"/etc/opendkim/keys/"
-            f"{domain}/mail.txt"
-        )
-        if not os.path.isfile(txt_path):
-            print(
-                f"Skipping {domain}, "
-                f"DKIM file not found yet"
-            )
-            continue
+    try:
+        dkim_text = subprocess.check_output(["sudo", "cat", txt_path], text=True)
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"DKIM file could not be read at {txt_path}. Error: {e}")
 
-        with open(txt_path, "r") as f:
-            dkim_text = f.read()
-
-        cleaned = (
-            dkim_text
-            .replace('"', '')
-            .replace('(', '')
-            .replace(')', '')
-            .replace('\n', '')
-        )
-
-        cleaned = cleaned.split('; -----')[0]
-
-        p_start = cleaned.find("p=")
-
-        if p_start == -1:
-            raise Exception(
-                f"Unable to parse DKIM for {domain}"
-            )
-
-        public_key = cleaned[p_start + 2:].strip()
-
-        dkim_value = (
-            f"v=DKIM1; k=rsa; p={public_key}"
-        )
-
-
-        # -------------------------------------------------
-        # A Records
-        # -------------------------------------------------
-
-        update_record(
-            secret,
-            domain,
-            "A",
-            "@",
-            VPS_IP,
-        )
-
-        update_record(
-            secret,
-            domain,
-            "A",
-            "mail",
-            VPS_IP,
-        )
-        update_record(
-            secret,
-            domain,
-            "A",
-            "*",
-            VPS_IP,
-        )
-
-        # -------------------------------------------------
-        # MX
-        # -------------------------------------------------
-
-        update_mx_record(
-            secret,
-            domain,
-        )
-
-        # -------------------------------------------------
-        # SPF
-        # -------------------------------------------------
-
-        update_record(
-            secret,
-            domain,
-            "TXT",
-            "@",
-            f"v=spf1 mx ip4:{VPS_IP} -all",
-        )
-
-        # -------------------------------------------------
-        # DMARC
-        # -------------------------------------------------
-
-        update_record(
-            secret,
-            domain,
-            "TXT",
-            "_dmarc",
-            (
-                f"v=DMARC1; p=reject; "
-                f"adkim=s; aspf=s; "
-                f"rua=mailto:dmarc@{domain}"
-            ),
-        )
-
-        # -------------------------------------------------
-        # DKIM
-        # -------------------------------------------------
-
-        update_record(
-            secret,
-            domain,
-            "TXT",
-            "mail._domainkey",
-            dkim_value,
-        )
-
-    return (
-        f"Updated DNS for "
-        f"{len(DOMAINS)} domains"
+    cleaned = (
+        dkim_text
+        .replace('"', '')
+        .replace('(', '')
+        .replace(')', '')
+        .replace('\n', '')
     )
 
+    cleaned = cleaned.split('; -----')[0]
+    p_start = cleaned.find("p=")
 
-# ---------------------------------------------------------------------------
+    if p_start == -1:
+        raise Exception(f"Unable to parse DKIM for {TARGET_DOMAIN}")
+
+    public_key = cleaned[p_start + 2:].strip()
+    dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
+
+    # Update Records
+    update_record(secret, TARGET_DOMAIN, "A", "@", VPS_IP)
+    update_record(secret, TARGET_DOMAIN, "A", "mail", VPS_IP)
+    update_record(secret, TARGET_DOMAIN, "A", "*", VPS_IP)
+    update_mx_record(secret, TARGET_DOMAIN)
+    update_record(secret, TARGET_DOMAIN, "TXT", "@", f"v=spf1 mx ip4:{VPS_IP} -all")
+    update_record(secret, TARGET_DOMAIN, "TXT", "_dmarc", f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
+    update_record(secret, TARGET_DOMAIN, "TXT", "mail._domainkey", dkim_value)
+
+    return f"Updated DNS for {TARGET_DOMAIN}"
+
+
 # Execute DNS Updates
-# ---------------------------------------------------------------------------
 update_dns_records = pulumi.Output.all(
     read_all_dkim.stdout,
     GODADDY_API_SECRET,
@@ -591,21 +413,11 @@ sudo systemctl is-active opendkim
         write_trustedhosts,
     ],
 )
+
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
 
-pulumi.export(
-    "domains",
-    DOMAINS,
-)
-
-pulumi.export(
-    "dns_update",
-    update_dns_records,
-)
-
-pulumi.export(
-    "dkim_dump",
-    read_all_dkim.stdout,
-)
+pulumi.export("target_domain", TARGET_DOMAIN)
+pulumi.export("dns_update", update_dns_records)
+pulumi.export("dkim_dump", read_all_dkim.stdout)
