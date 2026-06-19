@@ -2,3 +2,4 @@ pulumi
 pulumi-command
 requests
 ovh
+subprocess
