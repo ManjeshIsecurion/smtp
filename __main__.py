@@ -2,7 +2,7 @@ import os
 import re
 import base64
 import requests
-
+import subprocess
 import pulumi
 import pulumi_command as command
 
