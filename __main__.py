@@ -161,6 +161,7 @@ sudo mkdir -p /run/opendkim
 trusted_hosts = [
     "127.0.0.1",
     "localhost",
+    "106.51.72.179",
     VPS_IP,
     TARGET_DOMAIN,
     f"*.{TARGET_DOMAIN}",
