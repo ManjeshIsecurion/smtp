@@ -64,7 +64,7 @@ def generate_password(length=24):
     return "".join(secrets.choice(chars) for _ in range(length))
 
 # Parse the single domain username
-DOMAIN_USER = re.sub(r"\..*$", "", TARGET_DOMAIN)
+DOMAIN_USER = TARGET_DOMAIN
 
 # ---------------------------------------------------------------------------
 # Generate / Load Password for Single Domain
