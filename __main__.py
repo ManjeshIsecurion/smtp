@@ -48,7 +48,13 @@ PRIMARY_DOMAIN = get_primary_domain()
 
 
 # ---> FIXED: Target Domain set to your live production domain <---
-TARGET_DOMAIN = cfg.require("domain")
+BASE_DOMAIN = cfg.require("domain")
+TARGET_DOMAIN = cfg.require("fqdn")
+
+if TARGET_DOMAIN == BASE_DOMAIN:
+    HOST = "@"
+else:
+    HOST = TARGET_DOMAIN.replace("." + BASE_DOMAIN, "")
 
 # ---------------------------------------------------------------------------
 # Local Password Storage
@@ -376,13 +382,37 @@ def update_dns(secret):
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
 
     # Update Records
-    update_record(secret, TARGET_DOMAIN, "A", "@", VPS_IP)
-    update_record(secret, TARGET_DOMAIN, "A", "mail", VPS_IP)
-    update_record(secret, TARGET_DOMAIN, "A", "*", VPS_IP)
-    update_mx_record(secret, TARGET_DOMAIN)
-    update_record(secret, TARGET_DOMAIN, "TXT", "@", f"v=spf1 mx ip4:{VPS_IP} -all")
-    update_record(secret, TARGET_DOMAIN, "TXT", "_dmarc", f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
-    update_record(secret, TARGET_DOMAIN, "TXT", "mail._domainkey", dkim_value)
+    update_record(secret, BASE_DOMAIN, "A", HOST, VPS_IP)
+    if HOST == "@":
+        update_record(secret, BASE_DOMAIN, "A", "mail", VPS_IP)
+    else:
+        update_record(secret, BASE_DOMAIN, "A", f"mail.{HOST}", VPS_IP)
+    if HOST == "@":
+        update_mx_record(secret, BASE_DOMAIN)
+    update_record(
+    secret,
+    BASE_DOMAIN,
+    "TXT",
+    HOST,
+    f"v=spf1 mx ip4:{VPS_IP} -all"
+    )
+    dmarc_host = "_dmarc" if HOST == "@" else f"_dmarc.{HOST}"
+
+    update_record(
+    secret,
+    BASE_DOMAIN,
+    "TXT",
+    dmarc_host,
+    f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
+    selector = "mail._domainkey" if HOST == "@" else f"mail._domainkey.{HOST}"
+
+    update_record(
+    secret,
+    BASE_DOMAIN,
+    "TXT",
+    selector,
+    dkim_value
+    )
 
     return f"Updated DNS for {TARGET_DOMAIN}"
 
