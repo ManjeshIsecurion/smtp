@@ -13,10 +13,20 @@ cfg = pulumi.Config()
 GODADDY_API_KEY = cfg.require("godaddyApiKey")
 GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
 
-ROOT_DOMAIN = cfg.require("domain")   # e.g., "etmoney.co.in"
-TARGET_DOMAIN = cfg.require("fqdn")   # e.g., "xyz.etmoney.co.in" or "googl.etmoney.co.in"
+# ---------------------------------------------------------------------------
+# Server & Domain Config
+# ---------------------------------------------------------------------------
+def get_public_ip():
+    try:
+        return subprocess.check_output(["curl", "-s", "https://api.ipify.org"]).decode().strip()
+    except Exception as e:
+        raise Exception(f"Unable to determine public IP: {e}")
 
-# Extract Subdomain Prefix cleanly
+VPS_IP = get_public_ip()
+
+ROOT_DOMAIN = cfg.require("domain")
+TARGET_DOMAIN = cfg.require("fqdn")
+
 if TARGET_DOMAIN == ROOT_DOMAIN:
     SUBDOMAIN_PREFIX = ""
 else:
@@ -26,19 +36,6 @@ else:
     else:
         raise Exception(f"fqdn '{TARGET_DOMAIN}' is not under root domain '{ROOT_DOMAIN}'")
 
-# Suffix helper to give Pulumi completely unique resource names per client run
-RES_SUFFIX = f"_{SUBDOMAIN_PREFIX}" if SUBDOMAIN_PREFIX else "_root"
-
-# ---------------------------------------------------------------------------
-# Server & Domain Helpers
-# ---------------------------------------------------------------------------
-def get_public_ip():
-    try:
-        return subprocess.check_output(["curl", "-s", "https://api.ipify.org"]).decode().strip()
-    except Exception as e:
-        raise Exception(f"Unable to determine public IP: {e}")
-
-VPS_IP = get_public_ip()
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
 
 def generate_password(length=24):
@@ -47,11 +44,11 @@ def generate_password(length=24):
     chars = string.ascii_letters + string.digits + "!@#$%^&*()-_"
     return "".join(secrets.choice(chars) for _ in range(length))
 
-root_user = re.sub(r"\..*$", "", ROOT_DOMAIN)
-DOMAIN_USER = f"{SUBDOMAIN_PREFIX}-{root_user}" if SUBDOMAIN_PREFIX else root_user
+# ---> FIXED HERE: Username is now completely set to subdomain + domain (e.g., news.mulberri.in) <---
+DOMAIN_USER = TARGET_DOMAIN
 
 # ---------------------------------------------------------------------------
-# Thread-safe Password Management
+# Generate / Load Password for Single Domain
 # ---------------------------------------------------------------------------
 existing_passwords = {}
 if os.path.exists(PASSWORD_FILE):
@@ -71,54 +68,48 @@ with open(PASSWORD_FILE, "w") as f:
     for d, p in existing_passwords.items():
         f.write(f"{d}:{p}\n")
 
+RES_SUFFIX = f"_{SUBDOMAIN_PREFIX}" if SUBDOMAIN_PREFIX else "_root"
+
 # ---------------------------------------------------------------------------
-# Overwrite-Safe Pulumi Automation Core
+# Helpers
 # ---------------------------------------------------------------------------
 def run(name: str, cmd: str, deps=None):
     return command.local.Command(
-        f"{name}{RES_SUFFIX}", # Unique naming tracking per dynamic run
+        f"{name}{RES_SUFFIX}",
         create=cmd,
         opts=pulumi.ResourceOptions(depends_on=deps or []),
     )
 
 # ---------------------------------------------------------------------------
-# Append Configuration Sequences (No Overwriting)
+# Execution Blocks
 # ---------------------------------------------------------------------------
 create_opendkim_dirs = run(
     "create_opendkim_dirs",
-    "sudo mkdir -p /etc/opendkim/keys /run/opendkim"
+    "sudo mkdir -p /etc/opendkim /etc/opendkim/keys /run/opendkim"
 )
 
-# Append variables sequentially using 'tee -a' so old profiles remain completely intact
 append_mail_configs = run(
     "append_mail_configs",
     f"""
 echo "{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}" | sudo tee -a /etc/dovecot/users > /dev/null
-
 echo "{TARGET_DOMAIN}" | sudo tee -a /etc/opendkim/TrustedHosts > /dev/null
 echo "*.{TARGET_DOMAIN}" | sudo tee -a /etc/opendkim/TrustedHosts > /dev/null
 echo "mail.{TARGET_DOMAIN}" | sudo tee -a /etc/opendkim/TrustedHosts > /dev/null
-
 echo "mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/opendkim/keys/{TARGET_DOMAIN}/mail.private" | sudo tee -a /etc/opendkim/KeyTable > /dev/null
 echo "*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}" | sudo tee -a /etc/opendkim/SigningTable > /dev/null
 """,
     deps=[create_opendkim_dirs]
 )
 
-# ---------------------------------------------------------------------------
-# Generate DKIM Keys for This Domain Context
-# ---------------------------------------------------------------------------
 generate_dkim = run(
     "generate_dkim",
     f"""
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
-
 if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ]; then
     sudo opendkim-genkey -b 2048 -D /etc/opendkim/keys/{TARGET_DOMAIN} -s mail -d {TARGET_DOMAIN}
 fi
-
 sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
@@ -132,9 +123,6 @@ read_all_dkim = command.local.Command(
     opts=pulumi.ResourceOptions(depends_on=[generate_dkim]),
 )
 
-# ---------------------------------------------------------------------------
-# Global Configurations Management (Run safely once or updates seamlessly)
-# ---------------------------------------------------------------------------
 global_configs = run(
     "global_configs",
     """
@@ -154,12 +142,10 @@ ExternalIgnoreList /etc/opendkim/TrustedHosts
 InternalHosts /etc/opendkim/TrustedHosts
 EOF
 fi
-
 sudo postconf -e "milter_protocol = 6"
 sudo postconf -e "milter_default_action = accept"
 sudo postconf -e "smtpd_milters = inet:127.0.0.1:8891"
 sudo postconf -e "non_smtpd_milters = inet:127.0.0.1:8891"
-
 sudo systemctl restart postfix
 sudo systemctl restart opendkim
 """,
@@ -167,13 +153,9 @@ sudo systemctl restart opendkim
 )
 
 # ---------------------------------------------------------------------------
-# GoDaddy Safe Patch Automation (No Overwriting across instances)
+# GoDaddy Patch Integration
 # ---------------------------------------------------------------------------
 def patch_godaddy_records(secret, records_list):
-    """
-    Submits a context update via PATCH to incrementally add entries without
-    disturbing configurations belonging to your other active subdomains.
-    """
     url = f"https://api.godaddy.com/v1/domains/{ROOT_DOMAIN}/records"
     response = requests.patch(
         url,
@@ -208,25 +190,25 @@ def update_dns(secret):
             return record_name
         if record_name == "@":
             return SUBDOMAIN_PREFIX
-        if record_name == "*":
-            return f"*.{SUBDOMAIN_PREFIX}"
         return f"{record_name}.{SUBDOMAIN_PREFIX}"
 
-    # Safe payload targeted specifically to this client's unique path prefix
     patch_payload = [
         {"type": "A", "name": fix_name("@"), "data": VPS_IP, "ttl": 600},
         {"type": "A", "name": fix_name("mail"), "data": VPS_IP, "ttl": 600},
-        {"type": "A", "name": fix_name("*"), "data": VPS_IP, "ttl": 600},
-        {"type": "MX", "name": fix_name("@"), "data": f"mail.{TARGET_DOMAIN}", "priority": 10, "ttl": 600},
+        {"type": "MX", "name": fix_name("@"), "data": f"mail.{TARGET_DOMAIN}.", "priority": 10, "ttl": 600},
         {"type": "TXT", "name": fix_name("@"), "data": f"v=spf1 mx ip4:{VPS_IP} -all", "ttl": 600},
         {"type": "TXT", "name": fix_name("_dmarc"), "data": f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}", "ttl": 600},
         {"type": "TXT", "name": fix_name("mail._domainkey"), "data": dkim_value, "ttl": 600}
     ]
 
-    patch_godaddy_records(secret, patch_payload)
-    return f"Successfully added isolated records for {TARGET_DOMAIN}"
+    if SUBDOMAIN_PREFIX:
+        patch_payload.append({"type": "A", "name": f"*.{SUBDOMAIN_PREFIX}", "data": VPS_IP, "ttl": 600})
+    else:
+        patch_payload.append({"type": "A", "name": "*", "data": VPS_IP, "ttl": 600})
 
-# Execute DNS update
+    patch_godaddy_records(secret, patch_payload)
+    return f"Updated DNS for {TARGET_DOMAIN}"
+
 update_dns_records = pulumi.Output.all(
     read_all_dkim.stdout,
     GODADDY_API_SECRET,
