@@ -50,7 +50,6 @@ PRIMARY_DOMAIN = get_primary_domain()
 DOMAIN = cfg.require("domain")
 SUBDOMAIN = cfg.require("fqdn")
 
-# Dynamically construct the targets and prefixes
 ROOT_DOMAIN = DOMAIN
 SUBDOMAIN_PREFIX = SUBDOMAIN.strip(".")
 
