@@ -47,16 +47,19 @@ def get_primary_domain():
 PRIMARY_DOMAIN = get_primary_domain()
 
 # ---> FIXED: Target Domain set to your live production domain <---
-DOMAIN = cfg.require("domain")
-SUBDOMAIN = cfg.require("fqdn")
+ROOT_DOMAIN = cfg.require("domain")
+TARGET_DOMAIN = cfg.require("fqdn")
 
-ROOT_DOMAIN = DOMAIN
-SUBDOMAIN_PREFIX = SUBDOMAIN.strip(".")
-
-if SUBDOMAIN_PREFIX:
-    TARGET_DOMAIN = f"{SUBDOMAIN_PREFIX}.{ROOT_DOMAIN}"
+if TARGET_DOMAIN == ROOT_DOMAIN:
+    SUBDOMAIN_PREFIX = ""
 else:
-    TARGET_DOMAIN = ROOT_DOMAIN
+    suffix = "." + ROOT_DOMAIN
+    if TARGET_DOMAIN.endswith(suffix):
+        SUBDOMAIN_PREFIX = TARGET_DOMAIN[:-len(suffix)]
+    else:
+        raise Exception(
+            f"fqdn '{TARGET_DOMAIN}' is not under root domain '{ROOT_DOMAIN}'"
+        )
 
 
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
