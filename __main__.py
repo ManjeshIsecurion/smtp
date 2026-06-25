@@ -201,7 +201,7 @@ write_keytable = put(
 # ---------------------------------------------------------------------------
 
 # ---> FIXED: Removed '*@' pattern to avoid regex compilation mismatches <---
-signingtable_content = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
+signingtable_content = f"{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
 
 write_signingtable = put(
     "write_signingtable",
