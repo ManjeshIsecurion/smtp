@@ -231,7 +231,7 @@ UserID opendkim
 PidFile /run/opendkim/opendkim.pid
 
 KeyTable file:/etc/opendkim/KeyTable
-SigningTable refile:/etc/opendkim/SigningTable
+SigningTable file:/etc/opendkim/SigningTable
 ExternalIgnoreList /etc/opendkim/TrustedHosts
 InternalHosts /etc/opendkim/TrustedHosts
 """.strip(),
