@@ -265,7 +265,15 @@ pulumi.export(
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
-    cleaned = dkim_text.replace('"', '').replace('(', '').replace(')', '').replace('\n', '')
+    cleaned = (
+        dkim_text
+        .replace('"', '')
+        .replace('(', '')
+        .replace(')', '')
+        .replace('\n', '')
+        .replace('\t', '')  # <-- ADD THIS LINE to strip out hidden tab characters!
+        .replace(' ', '')   # <-- ADD THIS LINE to strip out any trailing spaces inside the key chunks!
+    )
     cleaned = cleaned.split('; -----')[0]
     p_start = cleaned.find("p=")
     if p_start == -1:
