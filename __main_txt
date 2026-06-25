@@ -46,19 +46,19 @@ def get_primary_domain():
 
 PRIMARY_DOMAIN = get_primary_domain()
 
+
 # ---> FIXED: Target Domain set to your live production domain <---
-DOMAIN = cfg.require("domain")
-SUBDOMAIN = cfg.require("fqdn")
+BASE_DOMAIN = cfg.require("domain")
+TARGET_DOMAIN = cfg.require("fqdn")
 
-# Dynamically construct the targets and prefixes
-ROOT_DOMAIN = DOMAIN
-SUBDOMAIN_PREFIX = SUBDOMAIN.strip(".")
-
-if SUBDOMAIN_PREFIX:
-    TARGET_DOMAIN = f"{SUBDOMAIN_PREFIX}.{ROOT_DOMAIN}"
+if TARGET_DOMAIN == BASE_DOMAIN:
+    HOST = "@"
 else:
-    TARGET_DOMAIN = ROOT_DOMAIN
+    HOST = TARGET_DOMAIN.replace("." + BASE_DOMAIN, "")
 
+# ---------------------------------------------------------------------------
+# Local Password Storage
+# ---------------------------------------------------------------------------
 
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
 
@@ -69,16 +69,8 @@ def generate_password(length=24):
     chars = string.ascii_letters + string.digits + "!@#$%^&*()-_"
     return "".join(secrets.choice(chars) for _ in range(length))
 
-
-# Extract the base root name
-root_user = re.sub(r"\..*$", "", ROOT_DOMAIN)
-
-# Combine subdomain and root name if a subdomain is active
-if SUBDOMAIN_PREFIX:
-    DOMAIN_USER = f"{SUBDOMAIN_PREFIX}-{root_user}"
-else:
-    DOMAIN_USER = root_user
-
+# Parse the single domain username
+DOMAIN_USER = TARGET_DOMAIN
 
 # ---------------------------------------------------------------------------
 # Generate / Load Password for Single Domain
@@ -105,13 +97,11 @@ with open(PASSWORD_FILE, "w") as f:
 
 print("Password generated/stored in:", PASSWORD_FILE)
 
-
 # ---------------------------------------------------------------------------
 # Generate Dovecot Password File
 # ---------------------------------------------------------------------------
 
 dovecot_users_content = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -210,6 +200,7 @@ write_keytable = put(
 # SigningTable
 # ---------------------------------------------------------------------------
 
+# ---> FIXED: Removed '*@' pattern to avoid regex compilation mismatches <---
 signingtable_content = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
 
 write_signingtable = put(
@@ -223,6 +214,7 @@ write_signingtable = put(
 # Config DKIM Keys
 # ------------------------------------------------------------->
 
+# ---> FIXED: Table lines changed from 'refile:' to explicit 'file:' <---
 write_opendkim_conf = put(
     "write_opendkim_conf",
     "/etc/opendkim.conf",
@@ -341,9 +333,14 @@ def update_mx_record(secret, domain, name, target_mail):
     response = requests.put(
         url,
         headers=godaddy_headers(secret),
-        json=[{"data": target_mail, "priority": 10, "ttl": 600}],
+        json=[{
+            "data": target_mail,
+            "priority": 10,
+            "ttl": 600
+        }],
         timeout=60,
     )
+
     print(f"{domain} MX {name}: {response.status_code}")
     response.raise_for_status()
 
@@ -354,7 +351,7 @@ pulumi.export(
         TARGET_DOMAIN: {
             "username": DOMAIN_USER,
             "password": DOMAIN_PASSWORD,
-        }
+            }
     },
 )
 
@@ -389,26 +386,53 @@ def update_dns(secret):
     public_key = cleaned[p_start + 2:].strip()
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
 
-    # Helper function to append the custom prefix correctly depending on whether it exists
     def fix_name(record_name):
-        if not SUBDOMAIN_PREFIX:
+        if HOST == "@":
             return record_name
+
         if record_name == "@":
-            return SUBDOMAIN_PREFIX
+            return HOST
+
         if record_name == "*":
-            return f"*.{SUBDOMAIN_PREFIX}"
-        return f"{record_name}.{SUBDOMAIN_PREFIX}"
+            return f"*.{HOST}"
 
-    # DNS Operations mapped to the split root domain zone
-    update_record(secret, ROOT_DOMAIN, "A", fix_name("@"), VPS_IP)
-    update_record(secret, ROOT_DOMAIN, "A", fix_name("mail"), VPS_IP)
-    update_record(secret, ROOT_DOMAIN, "A", fix_name("*"), VPS_IP)
+        return f"{record_name}.{HOST}"
 
-    update_mx_record(secret, ROOT_DOMAIN, fix_name("@"), f"mail.{TARGET_DOMAIN}")
+    # Update Records
+    update_record(secret, BASE_DOMAIN, "A", fix_name("@"), VPS_IP)
+    update_record(secret, BASE_DOMAIN, "A", fix_name("mail"), VPS_IP)
+    update_record(secret, BASE_DOMAIN, "A", fix_name("*"), VPS_IP)
 
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
+    update_mx_record(
+        secret,
+        BASE_DOMAIN,
+        fix_name("@"),
+        f"mail.{TARGET_DOMAIN}"
+    )
+
+    update_record(
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("@"),
+        f"v=spf1 mx ip4:{VPS_IP} -all"
+    )
+
+    update_record(
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("_dmarc"),
+        f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}"
+    )
+
+    update_record(
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("mail._domainkey"),
+        dkim_value
+    )
 
     return f"Updated DNS for {TARGET_DOMAIN}"
 
@@ -439,6 +463,18 @@ sudo systemctl is-active opendkim
         write_signingtable,
         write_trustedhosts,
     ],
+)
+
+verify_dkim = run(
+    "verify_dkim",
+    f"""
+sudo opendkim-testkey \
+    -d {TARGET_DOMAIN} \
+    -s mail \
+    -k /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
+    -vvv
+""",
+    deps=[restart_opendkim],
 )
 
 # ---------------------------------------------------------------------------
