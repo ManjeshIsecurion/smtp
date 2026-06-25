@@ -201,7 +201,7 @@ write_keytable = put(
 # ---------------------------------------------------------------------------
 
 # ---> FIXED: Removed '*@' pattern to avoid regex compilation mismatches <---
-signingtable_content = f"{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
+signingtable_content = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}\n"
 
 write_signingtable = put(
     "write_signingtable",
@@ -231,7 +231,7 @@ UserID opendkim
 PidFile /run/opendkim/opendkim.pid
 
 KeyTable file:/etc/opendkim/KeyTable
-SigningTable file:/etc/opendkim/SigningTable
+SigningTable refile:/etc/opendkim/SigningTable
 ExternalIgnoreList /etc/opendkim/TrustedHosts
 InternalHosts /etc/opendkim/TrustedHosts
 """.strip(),
@@ -327,16 +327,21 @@ def update_record(
     response.raise_for_status()
 
 
-def update_mx_record(secret, domain):
-    url = f"https://api.godaddy.com/v1/domains/{domain}/records/MX/@"
+def update_mx_record(secret, domain, name, target_mail):
+    url = f"https://api.godaddy.com/v1/domains/{domain}/records/MX/{name}"
 
     response = requests.put(
         url,
         headers=godaddy_headers(secret),
-        json=[{"data": f"mail.{domain}", "priority": 10, "ttl": 600}],
+        json=[{
+            "data": target_mail,
+            "priority": 10,
+            "ttl": 600
+        }],
         timeout=60,
     )
-    print(f"{domain} MX: {response.status_code}")
+
+    print(f"{domain} MX {name}: {response.status_code}")
     response.raise_for_status()
 
 
@@ -381,37 +386,52 @@ def update_dns(secret):
     public_key = cleaned[p_start + 2:].strip()
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
 
+    def fix_name(record_name):
+        if HOST == "@":
+            return record_name
+
+        if record_name == "@":
+            return HOST
+
+        if record_name == "*":
+            return f"*.{HOST}"
+
+        return f"{record_name}.{HOST}"
+
     # Update Records
-    update_record(secret, BASE_DOMAIN, "A", HOST, VPS_IP)
-    if HOST == "@":
-        update_record(secret, BASE_DOMAIN, "A", "mail", VPS_IP)
-    else:
-        update_record(secret, BASE_DOMAIN, "A", f"mail.{HOST}", VPS_IP)
-    if HOST == "@":
-        update_mx_record(secret, BASE_DOMAIN)
-    update_record(
-    secret,
-    BASE_DOMAIN,
-    "TXT",
-    HOST,
-    f"v=spf1 mx ip4:{VPS_IP} -all"
+    update_record(secret, BASE_DOMAIN, "A", fix_name("@"), VPS_IP)
+    update_record(secret, BASE_DOMAIN, "A", fix_name("mail"), VPS_IP)
+    update_record(secret, BASE_DOMAIN, "A", fix_name("*"), VPS_IP)
+
+    update_mx_record(
+        secret,
+        BASE_DOMAIN,
+        fix_name("@"),
+        f"mail.{TARGET_DOMAIN}"
     )
-    dmarc_host = "_dmarc" if HOST == "@" else f"_dmarc.{HOST}"
 
     update_record(
-    secret,
-    BASE_DOMAIN,
-    "TXT",
-    dmarc_host,
-    f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
-    selector = "mail._domainkey" if HOST == "@" else f"mail._domainkey.{HOST}"
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("@"),
+        f"v=spf1 mx ip4:{VPS_IP} -all"
+    )
 
     update_record(
-    secret,
-    BASE_DOMAIN,
-    "TXT",
-    selector,
-    dkim_value
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("_dmarc"),
+        f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}"
+    )
+
+    update_record(
+        secret,
+        BASE_DOMAIN,
+        "TXT",
+        fix_name("mail._domainkey"),
+        dkim_value
     )
 
     return f"Updated DNS for {TARGET_DOMAIN}"
@@ -443,6 +463,18 @@ sudo systemctl is-active opendkim
         write_signingtable,
         write_trustedhosts,
     ],
+)
+
+verify_dkim = run(
+    "verify_dkim",
+    f"""
+sudo opendkim-testkey \
+    -d {TARGET_DOMAIN} \
+    -s mail \
+    -k /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
+    -vvv
+""",
+    deps=[restart_opendkim],
 )
 
 # ---------------------------------------------------------------------------
