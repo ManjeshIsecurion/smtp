@@ -265,16 +265,24 @@ pulumi.export(
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
+    # 1. Split out the comment FIRST before removing newlines or spaces
+    if '; -----' in dkim_text:
+        dkim_text = dkim_text.split('; -----')[0]
+    elif ';' in dkim_text:
+        # Fallback if spaces were already modified elsewhere
+        dkim_text = dkim_text.split(';')[0]
+
+    # 2. Now cleanly strip out the syntactic layout symbols safely
     cleaned = (
         dkim_text
         .replace('"', '')
         .replace('(', '')
         .replace(')', '')
         .replace('\n', '')
-        .replace('\t', '')  # <-- ADD THIS LINE to strip out hidden tab characters!
-        .replace(' ', '')   # <-- ADD THIS LINE to strip out any trailing spaces inside the key chunks!
+        .replace('\t', '')
+        .replace(' ', '')
     )
-    cleaned = cleaned.split('; -----')[0]
+
     p_start = cleaned.find("p=")
     if p_start == -1:
         raise Exception(f"Unable to parse DKIM for {TARGET_DOMAIN}")
