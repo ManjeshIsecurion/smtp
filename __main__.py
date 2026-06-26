@@ -123,9 +123,7 @@ sudo sed -i '\\|^\\*.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
 sudo sed -i '\\|^mail.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
 
 sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}
-if [ -f "{PASSWORD_FILE}" ]; then
-    sudo sed -i '\|^{TARGET_DOMAIN}:|d' "{PASSWORD_FILE}"
-fi
+
 sudo systemctl stop opendkim || true
 """,
     deps=[prep_directories],
