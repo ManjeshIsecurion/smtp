@@ -171,16 +171,16 @@ echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable > /dev/null
 global_opendkim_conf = f"""
 Syslog yes
 LogWhy yes
-UMask 002
-Canonicalization relaxed/simple
+UMask 007
+Canonicalization relaxed/relaxed
 Mode sv
 Socket inet:8891@127.0.0.1
 UserID opendkim
 PidFile /run/opendkim/opendkim.pid
 KeyTable refile:/etc/opendkim/KeyTable
 SigningTable refile:/etc/opendkim/SigningTable
-ExternalIgnoreList /etc/opendkim/TrustedHosts
-InternalHosts /etc/opendkim/TrustedHosts
+ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
+InternalHosts refile:/etc/opendkim/TrustedHosts
 """.strip()
 
 encoded_conf = base64.b64encode(global_opendkim_conf.encode()).decode()
