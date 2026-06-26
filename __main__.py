@@ -16,7 +16,6 @@ cfg = pulumi.Config()
 
 GODADDY_API_KEY = cfg.require("godaddyApiKey")
 GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
-FORCE_RECREATE = cfg.get_bool("forceRecreate") or False  # Set to True via config to force a wipe
 
 # ---------------------------------------------------------------------------
 # Server & Domain Config
@@ -61,6 +60,7 @@ def generate_password(length=24):
 # ---------------------------------------------------------------------------
 
 existing_passwords = {}
+
 if os.path.exists(PASSWORD_FILE):
     with open(PASSWORD_FILE, "r") as f:
         for line in f:
@@ -68,11 +68,11 @@ if os.path.exists(PASSWORD_FILE):
                 d, p = line.strip().split(":", 1)
                 existing_passwords[d] = p
 
-# If FORCE_RECREATE is active, skip the cache and generate a brand new password
-if FORCE_RECREATE and TARGET_DOMAIN in existing_passwords:
+if TARGET_DOMAIN in existing_passwords:
     del existing_passwords[TARGET_DOMAIN]
 
-DOMAIN_PASSWORD = existing_passwords.get(TARGET_DOMAIN, generate_password())
+DOMAIN_PASSWORD = generate_password()
+
 existing_passwords[TARGET_DOMAIN] = DOMAIN_PASSWORD
 
 with open(PASSWORD_FILE, "w") as f:
@@ -86,8 +86,6 @@ with open(PASSWORD_FILE, "w") as f:
 def run(name: str, cmd: str, deps=None, trigger_values=None):
     # If forcing recreation, append a unique string to triggers to force execution
     t_vals = [cmd] if trigger_values is None else trigger_values
-    if FORCE_RECREATE:
-        t_vals.append("force-recreate-active")
         
     return command.local.Command(
         name,
@@ -109,6 +107,31 @@ sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable 
 """
 )
 
+cleanup_domain = run(
+    "cleanup_domain",
+    f"""
+set -e
+
+sudo sed -i '/^{DOMAIN_USER}:/d' /etc/dovecot/users
+
+sudo sed -i '\\|mail._domainkey.{TARGET_DOMAIN}|d' /etc/opendkim/KeyTable
+
+sudo sed -i '\\|\\*@{TARGET_DOMAIN}|d' /etc/opendkim/SigningTable
+
+sudo sed -i '\\|^{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
+sudo sed -i '\\|^\\*.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
+sudo sed -i '\\|^mail.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
+
+sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}
+if [ -f "{PASSWORD_FILE}" ]; then
+    sudo sed -i '\|^{TARGET_DOMAIN}:|d' "{PASSWORD_FILE}"
+fi
+sudo systemctl stop opendkim || true
+""",
+    deps=[prep_directories],
+    trigger_values=[TARGET_DOMAIN],
+)
+
 # ---------------------------------------------------------------------------
 # Additive System Mutations (Appends dynamically instead of overwriting)
 # ---------------------------------------------------------------------------
@@ -122,7 +145,7 @@ sudo sed -i '/^{DOMAIN_USER}:/d' /etc/dovecot/users
 printf '%s\n' '{dovecot_line}' | sudo tee -a /etc/dovecot/users > /dev/null
 sudo chmod 644 /etc/dovecot/users
 """,
-    deps=[prep_directories],
+    deps=[cleanup_domain],
     trigger_values=[dovecot_line]
 )
 
@@ -161,7 +184,7 @@ echo "{host}" | sudo tee -a /etc/opendkim/TrustedHosts >/dev/null
 write_trustedhosts = run(
     "write_trustedhosts",
     trusted_hosts_script,
-    deps=[prep_directories],
+    deps=[cleanup_domain],
     trigger_values=[TARGET_DOMAIN],
 )
 
@@ -173,7 +196,7 @@ write_keytable = run(
 sudo sed -i '\\|^mail._domainkey.{TARGET_DOMAIN} |d' /etc/opendkim/KeyTable
 echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable > /dev/null
 """,
-    deps=[prep_directories],
+    deps=[cleanup_domain],
     trigger_values=[keytable_line]
 )
 
@@ -185,7 +208,7 @@ write_signingtable = run(
 sudo sed -i '\\|^\\*@{TARGET_DOMAIN} |d' /etc/opendkim/SigningTable
 echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable > /dev/null
 """,
-    deps=[prep_directories],
+    deps=[cleanup_domain],
     trigger_values=[signingtable_line]
 )
 
@@ -235,34 +258,23 @@ sudo systemctl restart postfix
 # DKIM Key pair Isolation Factory (Modified to support forced wipe)
 # ---------------------------------------------------------------------------
 
-# If FORCE_RECREATE is true, we aggressively purge the key directory before generation
 purge_keys_cmd = ""
-if FORCE_RECREATE:
-    purge_keys_cmd = f"sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}"
+
 
 dkim_command = f"""
-{purge_keys_cmd}
+set -e
+
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
-sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
+
+sudo opendkim-genkey \
+    -b 2048 \
+    -D /etc/opendkim/keys/{TARGET_DOMAIN} \
+    -d {TARGET_DOMAIN} \
+    -s mail
+
+sudo chown -R opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
+
 sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
-
-if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ] || \
-   [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt ]; then
-
-    sudo rm -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
-    sudo rm -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
-
-    sudo opendkim-genkey \
-        -b 2048 \
-        -D /etc/opendkim/keys/{TARGET_DOMAIN} \
-        -s mail \
-        -d {TARGET_DOMAIN}
-fi
-
-sudo chown opendkim:opendkim \
-    /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
-    /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
-
 sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """
@@ -270,14 +282,18 @@ sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 generate_dkim = run(
     "generate_dkim",
     dkim_command,
-    deps=[write_signingtable, write_keytable],
-    trigger_values=[TARGET_DOMAIN, str(FORCE_RECREATE)]
+    deps=[
+        cleanup_domain,
+        write_signingtable,
+        write_keytable,
+    ],
+    trigger_values=[TARGET_DOMAIN],
 )
 
 read_all_dkim = command.local.Command(
     "read_all_dkim",
     create=f"sudo cat /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt",
-    triggers=[TARGET_DOMAIN, str(FORCE_RECREATE)],
+    triggers=[dkim_command],
     opts=pulumi.ResourceOptions(depends_on=[generate_dkim]),
 )
 
@@ -414,7 +430,7 @@ echo "Dovecot: $(sudo systemctl is-active dovecot)"
         configure_postfix_milter,
         generate_dkim,
     ],
-    trigger_values=[TARGET_DOMAIN, str(FORCE_RECREATE)],
+    trigger_values=[TARGET_DOMAIN],
 )
 
 # ---------------------------------------------------------------------------
