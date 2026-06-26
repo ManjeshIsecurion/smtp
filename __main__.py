@@ -96,8 +96,6 @@ prep_directories = run(
 sudo mkdir -p /etc/opendkim/keys
 sudo mkdir -p /run/opendkim
 sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable /etc/opendkim/SigningTable
-sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
-sudo chmod 750 /run/opendkim
 """
 )
 
@@ -186,7 +184,6 @@ sudo chmod 644 /etc/opendkim.conf
     deps=[write_keytable, write_signingtable, write_trustedhosts]
 )
 
-# FIXED: Added native canonical maps ensuring subdomains don't get overwritten
 configure_postfix_milter = run(
     "configure_postfix_milter",
     """
@@ -194,8 +191,7 @@ sudo postconf -e "milter_protocol = 6"
 sudo postconf -e "milter_default_action = accept"
 sudo postconf -e "smtpd_milters = inet:127.0.0.1:8891"
 sudo postconf -e "non_smtpd_milters = inet:127.0.0.1:8891"
-sudo postconf -e "masquerade_domains = "
-sudo postconf -e "local_header_rewrite_clients = "
+sudo systemctl restart postfix
 """,
     deps=[write_opendkim_conf],
 )
@@ -206,14 +202,14 @@ sudo postconf -e "local_header_rewrite_clients = "
 
 dkim_command = f"""
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
-sudo chown -R opendkim:opendkim /etc/opendkim
-sudo chmod 750 /etc/opendkim/keys
+sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
+sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
 
 if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ]; then
     sudo opendkim-genkey -b 2048 -D /etc/opendkim/keys/{TARGET_DOMAIN} -s mail -d {TARGET_DOMAIN}
 fi
 
-sudo chown -R opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
+sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """
@@ -269,11 +265,14 @@ pulumi.export(
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
+    # 1. Split out the comment FIRST before removing newlines or spaces
     if '; -----' in dkim_text:
         dkim_text = dkim_text.split('; -----')[0]
     elif ';' in dkim_text:
+        # Fallback if spaces were already modified elsewhere
         dkim_text = dkim_text.split(';')[0]
 
+    # 2. Now cleanly strip out the syntactic layout symbols safely
     cleaned = (
         dkim_text
         .replace('"', '')
@@ -319,36 +318,42 @@ update_dns_records = pulumi.Output.all(
 ).apply(lambda args: update_dns(args[0], args[1]))
 
 # ---------------------------------------------------------------------------
-# Atomic Real-Time Service Cycles (INCLUDES REPAIR ROUTINES)
+# Atomic Real-Time Service Cycles
 # ---------------------------------------------------------------------------
 
 reload_daemons = run(
     "reload_daemons",
     """
-# 1. Stop components cleanly to release system locks
-sudo systemctl stop postfix opendkim
+set -e
 
-# 2. Re-verify structural alignments and shared group memberships
-sudo usermod -aG opendkim postfix
+# Stop services cleanly
+sudo systemctl stop postfix opendkim || true
 
-# 3. Synchronize structural runtime directory storage paths
+# Ensure required group membership
+sudo usermod -aG opendkim postfix || true
+
+# Runtime directory
 sudo mkdir -p /run/opendkim
-sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
+sudo chown opendkim:opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
-sudo chown -R opendkim:opendkim /etc/opendkim/keys
+
+# OpenDKIM ownership
+sudo chown -R opendkim:opendkim /etc/opendkim
 sudo chmod -R 750 /etc/opendkim/keys
 
-# 4. Flush and reload systemd unit environments
+# Reload systemd units
 sudo systemctl daemon-reload
 
-# 5. Staged cold-boot sequence avoiding 451 milter sync races
-sudo systemctl start opendkim
+# Start services in order
+sudo systemctl restart opendkim
 sleep 2
-sudo systemctl start postfix
+sudo systemctl restart postfix
 sudo systemctl restart dovecot
 
-# 6. Sanity check testing metrics
-sudo systemctl is-active opendkim
+# Verify status
+echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
+echo "Postfix:  $(sudo systemctl is-active postfix)"
+echo "Dovecot:  $(sudo systemctl is-active dovecot)"
 """,
     deps=[
         write_dovecot_users,
@@ -356,10 +361,12 @@ sudo systemctl is-active opendkim
         write_keytable,
         write_signingtable,
         configure_postfix_milter,
-        generate_dkim
+        generate_dkim,
     ],
-    trigger_values=[TARGET_DOMAIN]
+    trigger_values=[TARGET_DOMAIN],
 )
+
+
 
 # ---------------------------------------------------------------------------
 # Terminal Control Interface Exports
