@@ -117,11 +117,21 @@ sudo chmod 644 /etc/dovecot/users
 )
 
 # 2. Append TrustedHosts Array Safely
-hosts_to_add = [TARGET_DOMAIN, f"*.{TARGET_DOMAIN}", f"mail.{TARGET_DOMAIN}"]
-trusted_hosts_script = f"sudo grep -qxF '127.0.0.1' /etc/opendkim/TrustedHosts || echo '127.0.0.1' | sudo tee -a /etc/opendkim/TrustedHosts\n"
-trusted_hosts_script += f"sudo grep -qxF '{VPS_IP}' /etc/opendkim/TrustedHosts || echo '{VPS_IP}' | sudo tee -a /etc/opendkim/TrustedHosts\n"
+hosts_to_add = [
+    "127.0.0.1",
+    "localhost",
+    VPS_IP,
+    TARGET_DOMAIN,
+    f"*.{TARGET_DOMAIN}",
+    f"mail.{TARGET_DOMAIN}",
+]
+
+trusted_hosts_script = ""
+
 for host in hosts_to_add:
-    trusted_hosts_script += f"sudo grep -qxF '{host}' /etc/opendkim/TrustedHosts || echo '{host}' | sudo tee -a /etc/opendkim/TrustedHosts\n"
+    trusted_hosts_script += f"""
+sudo grep -qxF "{host}" /etc/opendkim/TrustedHosts || echo "{host}" | sudo tee -a /etc/opendkim/TrustedHosts >/dev/null
+"""
 
 write_trustedhosts = run(
     "write_trustedhosts",
@@ -135,7 +145,7 @@ keytable_line = f"mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/open
 write_keytable = run(
     "write_keytable",
     f"""
-sudo sed -i '/^mail._domainkey.{TARGET_DOMAIN} /d' /etc/opendkim/KeyTable
+sudo sed -i '\\|^mail._domainkey.{TARGET_DOMAIN} |d' /etc/opendkim/KeyTable
 echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable > /dev/null
 """,
     deps=[prep_directories],
@@ -147,7 +157,7 @@ signingtable_line = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}"
 write_signingtable = run(
     "write_signingtable",
     f"""
-sudo sed -i '/*@{TARGET_DOMAIN} /d' /etc/opendkim/SigningTable
+sudo sed -i '\\|^\\*@{TARGET_DOMAIN} |d' /etc/opendkim/SigningTable
 echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable > /dev/null
 """,
     deps=[prep_directories],
@@ -205,11 +215,23 @@ sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
 
-if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ]; then
-    sudo opendkim-genkey -b 2048 -D /etc/opendkim/keys/{TARGET_DOMAIN} -s mail -d {TARGET_DOMAIN}
+if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ] || \
+   [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt ]; then
+
+    sudo rm -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
+    sudo rm -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
+
+    sudo opendkim-genkey \
+        -b 2048 \
+        -D /etc/opendkim/keys/{TARGET_DOMAIN} \
+        -s mail \
+        -d {TARGET_DOMAIN}
 fi
 
-sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
+sudo chown opendkim:opendkim \
+    /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
+    /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
+
 sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """
@@ -326,22 +348,19 @@ reload_daemons = run(
     """
 set -e
 
-# Stop services
 sudo systemctl stop postfix opendkim || true
 
-# Runtime directory
 sudo mkdir -p /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
+sudo chmod 750 /etc/opendkim
 
-# Secure DKIM key permissions
 sudo chown -R opendkim:opendkim /etc/opendkim/keys
 
 sudo find /etc/opendkim/keys -type d -exec chmod 750 {} \\;
 sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {} \\;
 sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {} \\;
 
-# Reload services
 sudo systemctl daemon-reload
 
 sudo systemctl start opendkim
@@ -350,8 +369,8 @@ sudo systemctl start postfix
 sudo systemctl restart dovecot
 
 echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
-echo "Postfix:  $(sudo systemctl is-active postfix)"
-echo "Dovecot:  $(sudo systemctl is-active dovecot)"
+echo "Postfix: $(sudo systemctl is-active postfix)"
+echo "Dovecot: $(sudo systemctl is-active dovecot)"
 """,
     deps=[
         write_dovecot_users,
