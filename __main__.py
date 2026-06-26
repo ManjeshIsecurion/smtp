@@ -45,7 +45,6 @@ else:
             f"fqdn '{TARGET_DOMAIN}' is not under root domain '{ROOT_DOMAIN}'"
         )
 
-# Extract local system naming components
 root_user = re.sub(r"\..*$", "", ROOT_DOMAIN)
 DOMAIN_USER = f"{SUBDOMAIN_PREFIX}-{root_user}" if SUBDOMAIN_PREFIX else root_user
 
@@ -96,14 +95,14 @@ prep_directories = run(
 sudo mkdir -p /etc/opendkim/keys
 sudo mkdir -p /run/opendkim
 sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable /etc/opendkim/SigningTable
+sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 """
 )
 
 # ---------------------------------------------------------------------------
-# Additive System Mutations (Appends dynamically instead of overwriting)
+# Additive System Mutations
 # ---------------------------------------------------------------------------
 
-# 1. Update Dovecot Users Line Item Safely
 dovecot_line = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
 write_dovecot_users = run(
     "write_dovecot_users",
@@ -116,7 +115,6 @@ sudo chmod 644 /etc/dovecot/users
     trigger_values=[dovecot_line]
 )
 
-# 2. Append TrustedHosts Array Safely
 hosts_to_add = [TARGET_DOMAIN, f"*.{TARGET_DOMAIN}", f"mail.{TARGET_DOMAIN}"]
 trusted_hosts_script = f"sudo grep -qxF '127.0.0.1' /etc/opendkim/TrustedHosts || echo '127.0.0.1' | sudo tee -a /etc/opendkim/TrustedHosts\n"
 trusted_hosts_script += f"sudo grep -qxF '{VPS_IP}' /etc/opendkim/TrustedHosts || echo '{VPS_IP}' | sudo tee -a /etc/opendkim/TrustedHosts\n"
@@ -130,7 +128,6 @@ write_trustedhosts = run(
     trigger_values=[TARGET_DOMAIN]
 )
 
-# 3. Append KeyTable Safely
 keytable_line = f"mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/opendkim/keys/{TARGET_DOMAIN}/mail.private"
 write_keytable = run(
     "write_keytable",
@@ -142,7 +139,6 @@ echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable > /dev/null
     trigger_values=[keytable_line]
 )
 
-# 4. Append SigningTable Safely
 signingtable_line = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}"
 write_signingtable = run(
     "write_signingtable",
@@ -184,6 +180,7 @@ sudo chmod 644 /etc/opendkim.conf
     deps=[write_keytable, write_signingtable, write_trustedhosts]
 )
 
+# FIXED: Added explicit masquerade and origin settings to preserve subdomains
 configure_postfix_milter = run(
     "configure_postfix_milter",
     """
@@ -191,6 +188,8 @@ sudo postconf -e "milter_protocol = 6"
 sudo postconf -e "milter_default_action = accept"
 sudo postconf -e "smtpd_milters = inet:127.0.0.1:8891"
 sudo postconf -e "non_smtpd_milters = inet:127.0.0.1:8891"
+sudo postconf -e "masquerade_domains = "
+sudo postconf -e "local_header_rewrite_clients = "
 sudo systemctl restart postfix
 """,
     deps=[write_opendkim_conf],
@@ -202,14 +201,14 @@ sudo systemctl restart postfix
 
 dkim_command = f"""
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
-sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
-sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
+sudo chown -R opendkim:opendkim /etc/opendkim
+sudo chmod 750 /etc/opendkim/keys
 
 if [ ! -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private ]; then
     sudo opendkim-genkey -b 2048 -D /etc/opendkim/keys/{TARGET_DOMAIN} -s mail -d {TARGET_DOMAIN}
 fi
 
-sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
+sudo chown -R opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chmod 600 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 sudo chmod 644 /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt
 """
@@ -265,14 +264,11 @@ pulumi.export(
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
-    # 1. Split out the comment FIRST before removing newlines or spaces
     if '; -----' in dkim_text:
         dkim_text = dkim_text.split('; -----')[0]
     elif ';' in dkim_text:
-        # Fallback if spaces were already modified elsewhere
         dkim_text = dkim_text.split(';')[0]
 
-    # 2. Now cleanly strip out the syntactic layout symbols safely
     cleaned = (
         dkim_text
         .replace('"', '')
@@ -299,13 +295,11 @@ def update_dns(secret, dkim_text):
             return f"*.{SUBDOMAIN_PREFIX}"
         return f"{record_name}.{SUBDOMAIN_PREFIX}"
 
-    # Publish GoDaddy routing records for specific contextual subdomains
     update_record(secret, ROOT_DOMAIN, "A", fix_name("@"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("mail"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("*"), VPS_IP)
     update_mx_record(secret, ROOT_DOMAIN, fix_name("@"), f"mail.{TARGET_DOMAIN}")
     
-    # Core Security Layer Frameworks
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
@@ -321,9 +315,13 @@ update_dns_records = pulumi.Output.all(
 # Atomic Real-Time Service Cycles
 # ---------------------------------------------------------------------------
 
+# FIXED: Added recursive key permission fixes and mapped postfix to the opendkim security group
 reload_daemons = run(
     "reload_daemons",
     """
+sudo usermod -aG opendkim postfix
+sudo chown -R opendkim:opendkim /etc/opendkim/keys
+sudo chmod -R 750 /etc/opendkim/keys
 sudo systemctl daemon-reload
 sudo systemctl restart opendkim
 sudo systemctl restart postfix
