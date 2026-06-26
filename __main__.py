@@ -305,11 +305,12 @@ def update_dns(secret, dkim_text):
         .replace(' ', '')
     )
 
-    p_start = cleaned.find("p=")
-    if p_start == -1:
+    match = re.search(r"p=([A-Za-z0-9+/=]+)", cleaned)
+
+    if not match:
         raise Exception(f"Unable to parse DKIM for {TARGET_DOMAIN}")
 
-    public_key = cleaned[p_start + 2:].strip()
+    public_key = match.group(1)
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
 
     def fix_name(record_name):
@@ -377,6 +378,7 @@ echo "Dovecot: $(sudo systemctl is-active dovecot)"
         write_trustedhosts,
         write_keytable,
         write_signingtable,
+        write_opendkim_conf,
         configure_postfix_milter,
         generate_dkim,
     ],
