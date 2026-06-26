@@ -192,10 +192,10 @@ Mode sv
 Socket inet:8891@127.0.0.1
 UserID opendkim
 PidFile /run/opendkim/opendkim.pid
-KeyTable file:/etc/opendkim/KeyTable
-SigningTable file:/etc/opendkim/SigningTable
-ExternalIgnoreList file:/etc/opendkim/TrustedHosts
-InternalHosts file:/etc/opendkim/TrustedHosts
+KeyTable refile:/etc/opendkim/KeyTable
+SigningTable refile:/etc/opendkim/SigningTable
+ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
+InternalHosts refile:/etc/opendkim/TrustedHosts
 """.strip()
 
 encoded_conf = base64.b64encode(global_opendkim_conf.encode()).decode()
