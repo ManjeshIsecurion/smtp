@@ -388,12 +388,14 @@ update_dns_records = pulumi.Output.all(
 
 reload_daemons = run(
     "reload_daemons",
-    """
+    f"""
 set -e
 
+echo "Stopping services..."
 sudo systemctl stop postfix || true
 sudo systemctl stop opendkim || true
 
+echo "Preparing directories..."
 sudo mkdir -p /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
@@ -401,31 +403,50 @@ sudo chmod 750 /etc/opendkim
 
 sudo chown -R opendkim:opendkim /etc/opendkim/keys
 
-sudo find /etc/opendkim/keys -type d -exec chmod 750 {} \\;
-sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {} \\;
-sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {} \\;
+sudo find /etc/opendkim/keys -type d -exec chmod 750 {{}} \\;
+sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {{}} \\;
+sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {{}} \\;
 
+echo "Reloading systemd..."
 sudo systemctl daemon-reload
 
+echo "Starting OpenDKIM..."
 sudo systemctl start opendkim
-sleep 3
+
+sleep 5
 
 sudo systemctl is-active --quiet opendkim
+
+echo "Checking DKIM key exists..."
+
+sudo test -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
+
+echo "Testing OpenDKIM..."
 
 sudo opendkim-testkey \
     -d {TARGET_DOMAIN} \
     -s mail \
-    -k /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
-    -v
+    -x /etc/opendkim.conf \
+    -vvv
 
+echo "Restarting Dovecot..."
 sudo systemctl restart dovecot
-sleep 1
 
+sleep 2
+
+echo "Starting Postfix..."
 sudo systemctl start postfix
 
-echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
-echo "Postfix: $(sudo systemctl is-active postfix)"
-echo "Dovecot: $(sudo systemctl is-active dovecot)"
+sleep 2
+
+echo ""
+echo "=============================="
+echo "OpenDKIM : $(sudo systemctl is-active opendkim)"
+echo "Postfix  : $(sudo systemctl is-active postfix)"
+echo "Dovecot  : $(sudo systemctl is-active dovecot)"
+echo "=============================="
+
+echo "DKIM verification completed."
 """,
     deps=[
         write_dovecot_users,
@@ -436,7 +457,9 @@ echo "Dovecot: $(sudo systemctl is-active dovecot)"
         configure_postfix_milter,
         generate_dkim,
     ],
-    trigger_values=[TARGET_DOMAIN],
+    trigger_values=[
+        TARGET_DOMAIN,
+    ],
 )
 
 # ---------------------------------------------------------------------------
