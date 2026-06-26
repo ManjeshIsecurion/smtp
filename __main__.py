@@ -366,8 +366,11 @@ reload_daemons = run(
     """
 set -e
 
-sudo systemctl stop postfix opendkim || true
+# 1. Stop Postfix first so no active mail streams handle a dying milter hook
+sudo systemctl stop postfix || true
+sudo systemctl stop opendkim || true
 
+# 2. Fix directory paths and enforce isolation permissions cleanly
 sudo mkdir -p /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
@@ -381,10 +384,16 @@ sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {} \\;
 
 sudo systemctl daemon-reload
 
+# 3. Start OpenDKIM first and give its socket 3 seconds to fully initialize
 sudo systemctl start opendkim
-sleep 2
-sudo systemctl start postfix
+sleep 3
+
+# 4. Cycle Dovecot to cleanly hook your user lines
 sudo systemctl restart dovecot
+sleep 1
+
+# 5. Launch Postfix last so it successfully attaches to the online OpenDKIM milter
+sudo systemctl start postfix
 
 echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
 echo "Postfix: $(sudo systemctl is-active postfix)"
