@@ -116,7 +116,10 @@ sudo chmod 644 /etc/dovecot/users
     trigger_values=[dovecot_line]
 )
 
+# ---------------------------------------------------------------------------
 # 2. Append TrustedHosts Array Safely
+# ---------------------------------------------------------------------------
+
 hosts_to_add = [
     "127.0.0.1",
     "localhost",
@@ -126,18 +129,30 @@ hosts_to_add = [
     f"mail.{TARGET_DOMAIN}",
 ]
 
-trusted_hosts_script = ""
+trusted_hosts_script = """
+set -e
+
+sudo mkdir -p /etc/opendkim
+sudo touch /etc/opendkim/TrustedHosts
+
+# Ensure the file always ends with a newline
+sudo sed -i -e '$a\\' /etc/opendkim/TrustedHosts
+"""
 
 for host in hosts_to_add:
     trusted_hosts_script += f"""
-sudo grep -qxF "{host}" /etc/opendkim/TrustedHosts || echo "{host}" | sudo tee -a /etc/opendkim/TrustedHosts >/dev/null
+# Remove duplicate entry if it exists
+sudo sed -i '\\|^{host}$|d' /etc/opendkim/TrustedHosts
+
+# Add the host back once
+echo "{host}" | sudo tee -a /etc/opendkim/TrustedHosts >/dev/null
 """
 
 write_trustedhosts = run(
     "write_trustedhosts",
     trusted_hosts_script,
     deps=[prep_directories],
-    trigger_values=[TARGET_DOMAIN]
+    trigger_values=[TARGET_DOMAIN],
 )
 
 # 3. Append KeyTable Safely
