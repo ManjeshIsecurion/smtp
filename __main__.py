@@ -16,6 +16,7 @@ cfg = pulumi.Config()
 
 GODADDY_API_KEY = cfg.require("godaddyApiKey")
 GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
+FORCE_RECREATE = cfg.get_bool("forceRecreate") or False  # Set to True via config to force a wipe
 
 # ---------------------------------------------------------------------------
 # Server & Domain Config
@@ -67,6 +68,10 @@ if os.path.exists(PASSWORD_FILE):
                 d, p = line.strip().split(":", 1)
                 existing_passwords[d] = p
 
+# If FORCE_RECREATE is active, skip the cache and generate a brand new password
+if FORCE_RECREATE and TARGET_DOMAIN in existing_passwords:
+    del existing_passwords[TARGET_DOMAIN]
+
 DOMAIN_PASSWORD = existing_passwords.get(TARGET_DOMAIN, generate_password())
 existing_passwords[TARGET_DOMAIN] = DOMAIN_PASSWORD
 
@@ -79,10 +84,15 @@ with open(PASSWORD_FILE, "w") as f:
 # ---------------------------------------------------------------------------
 
 def run(name: str, cmd: str, deps=None, trigger_values=None):
+    # If forcing recreation, append a unique string to triggers to force execution
+    t_vals = [cmd] if trigger_values is None else trigger_values
+    if FORCE_RECREATE:
+        t_vals.append("force-recreate-active")
+        
     return command.local.Command(
         name,
         create=cmd,
-        triggers=[cmd] if trigger_values is None else trigger_values,
+        triggers=t_vals,
         opts=pulumi.ResourceOptions(depends_on=deps or []),
     )
 
@@ -103,7 +113,6 @@ sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable 
 # Additive System Mutations (Appends dynamically instead of overwriting)
 # ---------------------------------------------------------------------------
 
-# 1. Update Dovecot Users Line Item Safely
 dovecot_line = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
 
 write_dovecot_users = run(
@@ -116,7 +125,6 @@ sudo chmod 644 /etc/dovecot/users
     deps=[prep_directories],
     trigger_values=[dovecot_line]
 )
-
 
 # ---------------------------------------------------------------------------
 # 2. Append TrustedHosts Array Safely
@@ -224,10 +232,16 @@ sudo systemctl restart postfix
 )
 
 # ---------------------------------------------------------------------------
-# DKIM Key pair Isolation Factory
+# DKIM Key pair Isolation Factory (Modified to support forced wipe)
 # ---------------------------------------------------------------------------
 
+# If FORCE_RECREATE is true, we aggressively purge the key directory before generation
+purge_keys_cmd = ""
+if FORCE_RECREATE:
+    purge_keys_cmd = f"sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}"
+
 dkim_command = f"""
+{purge_keys_cmd}
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chown opendkim:opendkim /etc/opendkim/keys/{TARGET_DOMAIN}
 sudo chmod 700 /etc/opendkim/keys/{TARGET_DOMAIN}
@@ -257,13 +271,13 @@ generate_dkim = run(
     "generate_dkim",
     dkim_command,
     deps=[write_signingtable, write_keytable],
-    trigger_values=[TARGET_DOMAIN]
+    trigger_values=[TARGET_DOMAIN, str(FORCE_RECREATE)]
 )
 
 read_all_dkim = command.local.Command(
     "read_all_dkim",
     create=f"sudo cat /etc/opendkim/keys/{TARGET_DOMAIN}/mail.txt",
-    triggers=[TARGET_DOMAIN],
+    triggers=[TARGET_DOMAIN, str(FORCE_RECREATE)],
     opts=pulumi.ResourceOptions(depends_on=[generate_dkim]),
 )
 
@@ -280,6 +294,7 @@ def godaddy_headers(secret):
 
 def update_record(secret, domain, record_type, name, value, ttl=600):
     url = f"https://api.godaddy.com/v1/domains/{domain}/records/{record_type}/{name}"
+    # GoDaddy's PUT request updates/overwrites existing array records automatically
     response = requests.put(
         url, headers=godaddy_headers(secret), json=[{"data": value, "ttl": ttl}], timeout=60
     )
@@ -304,14 +319,11 @@ pulumi.export(
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
-    # 1. Split out the comment FIRST before removing newlines or spaces
     if '; -----' in dkim_text:
         dkim_text = dkim_text.split('; -----')[0]
     elif ';' in dkim_text:
-        # Fallback if spaces were already modified elsewhere
         dkim_text = dkim_text.split(';')[0]
 
-    # 2. Now cleanly strip out the syntactic layout symbols safely
     cleaned = (
         dkim_text
         .replace('"', '')
@@ -339,13 +351,12 @@ def update_dns(secret, dkim_text):
             return f"*.{SUBDOMAIN_PREFIX}"
         return f"{record_name}.{SUBDOMAIN_PREFIX}"
 
-    # Publish GoDaddy routing records for specific contextual subdomains
+    # Overwrite/refresh records entirely on GoDaddy
     update_record(secret, ROOT_DOMAIN, "A", fix_name("@"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("mail"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("*"), VPS_IP)
     update_mx_record(secret, ROOT_DOMAIN, fix_name("@"), f"mail.{TARGET_DOMAIN}")
     
-    # Core Security Layer Frameworks
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
@@ -366,11 +377,9 @@ reload_daemons = run(
     """
 set -e
 
-# 1. Stop Postfix first so no active mail streams handle a dying milter hook
 sudo systemctl stop postfix || true
 sudo systemctl stop opendkim || true
 
-# 2. Fix directory paths and enforce isolation permissions cleanly
 sudo mkdir -p /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
@@ -384,15 +393,12 @@ sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {} \\;
 
 sudo systemctl daemon-reload
 
-# 3. Start OpenDKIM first and give its socket 3 seconds to fully initialize
 sudo systemctl start opendkim
 sleep 3
 
-# 4. Cycle Dovecot to cleanly hook your user lines
 sudo systemctl restart dovecot
 sleep 1
 
-# 5. Launch Postfix last so it successfully attaches to the online OpenDKIM milter
 sudo systemctl start postfix
 
 echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
@@ -408,7 +414,7 @@ echo "Dovecot: $(sudo systemctl is-active dovecot)"
         configure_postfix_milter,
         generate_dkim,
     ],
-    trigger_values=[TARGET_DOMAIN],
+    trigger_values=[TARGET_DOMAIN, str(FORCE_RECREATE)],
 )
 
 # ---------------------------------------------------------------------------
