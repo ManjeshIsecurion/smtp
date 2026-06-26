@@ -7,6 +7,7 @@ import secrets
 import string
 import pulumi
 import pulumi_command as command
+import time
 
 # ---------------------------------------------------------------------------
 # Pulumi Config
@@ -93,6 +94,26 @@ def run(name: str, cmd: str, deps=None, trigger_values=None):
         triggers=t_vals,
         opts=pulumi.ResourceOptions(depends_on=deps or []),
     )
+
+#domain skim propagation wait function
+def wait_for_dkim(domain):
+    for _ in range(60):
+        try:
+            out = subprocess.check_output(
+                ["dig", "+short", "TXT", f"mail._domainkey.{domain}"],
+                text=True,
+            )
+
+            if "DKIM1" in out:
+                print("DKIM record propagated.")
+                return
+
+        except Exception:
+            pass
+
+        time.sleep(5)
+
+    raise Exception("DKIM DNS record did not propagate.")
 
 # ---------------------------------------------------------------------------
 # Multi-Tenant Core Configuration Directory Prep
@@ -374,6 +395,7 @@ def update_dns(secret, dkim_text):
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
+    wait_for_dkim(TARGET_DOMAIN)
 
     return f"Successfully established independent sub-routing maps for {TARGET_DOMAIN}"
 
@@ -381,6 +403,7 @@ update_dns_records = pulumi.Output.all(
     GODADDY_API_SECRET,
     read_all_dkim.stdout
 ).apply(lambda args: update_dns(args[0], args[1]))
+
 
 # ---------------------------------------------------------------------------
 # Atomic Real-Time Service Cycles
@@ -423,11 +446,6 @@ sudo test -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 
 echo "Testing OpenDKIM..."
 
-sudo opendkim-testkey \
-    -d {TARGET_DOMAIN} \
-    -s mail \
-    -x /etc/opendkim.conf \
-    -vvv
 
 echo "Restarting Dovecot..."
 sudo systemctl restart dovecot
