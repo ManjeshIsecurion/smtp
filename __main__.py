@@ -324,36 +324,12 @@ update_dns_records = pulumi.Output.all(
 reload_daemons = run(
     "reload_daemons",
     """
-set -e
-
-# Stop services cleanly
-sudo systemctl stop postfix opendkim || true
-
-# Ensure required group membership
-sudo usermod -aG opendkim postfix || true
-
-# Runtime directory
-sudo mkdir -p /run/opendkim
-sudo chown opendkim:opendkim /run/opendkim
-sudo chmod 750 /run/opendkim
-
-# OpenDKIM ownership
-sudo chown -R opendkim:opendkim /etc/opendkim
-sudo chmod -R 750 /etc/opendkim/keys
-
-# Reload systemd units
 sudo systemctl daemon-reload
-
-# Start services in order
 sudo systemctl restart opendkim
-sleep 2
 sudo systemctl restart postfix
 sudo systemctl restart dovecot
-
-# Verify status
-echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
-echo "Postfix:  $(sudo systemctl is-active postfix)"
-echo "Dovecot:  $(sudo systemctl is-active dovecot)"
+sleep 2
+sudo systemctl is-active opendkim
 """,
     deps=[
         write_dovecot_users,
@@ -361,12 +337,10 @@ echo "Dovecot:  $(sudo systemctl is-active dovecot)"
         write_keytable,
         write_signingtable,
         configure_postfix_milter,
-        generate_dkim,
+        generate_dkim
     ],
-    trigger_values=[TARGET_DOMAIN],
+    trigger_values=[TARGET_DOMAIN]
 )
-
-
 
 # ---------------------------------------------------------------------------
 # Terminal Control Interface Exports
