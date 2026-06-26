@@ -410,12 +410,12 @@ sudo systemctl daemon-reload
 sudo systemctl start opendkim
 sleep 3
 
-sudo systemctl is-active --quiet opendkim || exit 1
+sudo systemctl is-active --quiet opendkim
 
 sudo opendkim-testkey \
-    -d ${TARGET_DOMAIN} \
+    -d {TARGET_DOMAIN} \
     -s mail \
-    -k /etc/opendkim/keys/${TARGET_DOMAIN}/mail.private \
+    -k /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private \
     -v
 
 sudo systemctl restart dovecot
