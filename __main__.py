@@ -105,16 +105,18 @@ sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable 
 
 # 1. Update Dovecot Users Line Item Safely
 dovecot_line = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
+
 write_dovecot_users = run(
     "write_dovecot_users",
     f"""
 sudo sed -i '/^{DOMAIN_USER}:/d' /etc/dovecot/users
-echo "{dovecot_line}" | sudo tee -a /etc/dovecot/users > /dev/null
+printf '%s\n' '{dovecot_line}' | sudo tee -a /etc/dovecot/users > /dev/null
 sudo chmod 644 /etc/dovecot/users
 """,
     deps=[prep_directories],
     trigger_values=[dovecot_line]
 )
+
 
 # ---------------------------------------------------------------------------
 # 2. Append TrustedHosts Array Safely
