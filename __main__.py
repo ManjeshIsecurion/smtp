@@ -326,31 +326,29 @@ reload_daemons = run(
     """
 set -e
 
-# 1. Kill any ghost/stuck processes
+# Stop services
 sudo systemctl stop postfix opendkim || true
 
-# 2. Fix directory permissions completely
+# Runtime directory
 sudo mkdir -p /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
 sudo chmod 750 /run/opendkim
 
-# Ensure DKIM keys are owned correctly
+# Secure DKIM key permissions
 sudo chown -R opendkim:opendkim /etc/opendkim/keys
-sudo chmod -R 750 /etc/opendkim/keys
 
-# 3. Add system level access groups
-sudo usermod -aG opendkim postfix || true
+sudo find /etc/opendkim/keys -type d -exec chmod 750 {} \\;
+sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {} \\;
+sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {} \\;
 
-# 4. Reload systemd units
+# Reload services
 sudo systemctl daemon-reload
 
-# 5. Start everything back up fresh
 sudo systemctl start opendkim
 sleep 2
 sudo systemctl start postfix
 sudo systemctl restart dovecot
 
-# 6. Verify services
 echo "OpenDKIM: $(sudo systemctl is-active opendkim)"
 echo "Postfix:  $(sudo systemctl is-active postfix)"
 echo "Dovecot:  $(sudo systemctl is-active dovecot)"
