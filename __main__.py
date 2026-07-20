@@ -1,10 +1,7 @@
 import os
 import re
-import base64
 import requests
 import subprocess
-import secrets
-import string
 import pulumi
 import pulumi_command as command
 import time
@@ -22,15 +19,7 @@ GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
 # Server & Domain Config
 # ---------------------------------------------------------------------------
 
-def get_public_ip():
-    try:
-        return subprocess.check_output(
-            ["curl", "-s", "https://api.ipify.org"]
-        ).decode().strip()
-    except Exception as e:
-        raise Exception(f"Unable to determine public IP: {e}")
-
-VPS_IP = get_public_ip()
+VPS_IP = "51.79.63.247"
 
 ROOT_DOMAIN = cfg.require("domain")
 TARGET_DOMAIN = cfg.require("fqdn")
@@ -46,40 +35,6 @@ else:
             f"fqdn '{TARGET_DOMAIN}' is not under root domain '{ROOT_DOMAIN}'"
         )
 
-# Extract local system naming components
-root_user = re.sub(r"\..*$", "", ROOT_DOMAIN)
-DOMAIN_USER = f"{SUBDOMAIN_PREFIX}-{root_user}" if SUBDOMAIN_PREFIX else root_user
-
-PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
-
-def generate_password(length=24):
-    chars = string.ascii_letters + string.digits + "!@#$%^&*()-_"
-    return "".join(secrets.choice(chars) for _ in range(length))
-
-# ---------------------------------------------------------------------------
-# Manage Isolated State for Single Run
-# ---------------------------------------------------------------------------
-
-existing_passwords = {}
-
-if os.path.exists(PASSWORD_FILE):
-    with open(PASSWORD_FILE, "r") as f:
-        for line in f:
-            if ":" in line:
-                d, p = line.strip().split(":", 1)
-                existing_passwords[d] = p
-
-if TARGET_DOMAIN in existing_passwords:
-    del existing_passwords[TARGET_DOMAIN]
-
-DOMAIN_PASSWORD = generate_password()
-
-existing_passwords[TARGET_DOMAIN] = DOMAIN_PASSWORD
-
-with open(PASSWORD_FILE, "w") as f:
-    for domain, password in sorted(existing_passwords.items()):
-        f.write(f"{domain}:{password}\n")
-
 # ---------------------------------------------------------------------------
 # Execution Execution Engine Helpers
 # ---------------------------------------------------------------------------
@@ -87,7 +42,7 @@ with open(PASSWORD_FILE, "w") as f:
 def run(name: str, cmd: str, deps=None, trigger_values=None):
     # If forcing recreation, append a unique string to triggers to force execution
     t_vals = [cmd] if trigger_values is None else trigger_values
-        
+
     return command.local.Command(
         name,
         create=cmd,
@@ -117,55 +72,19 @@ def wait_for_dkim(domain):
 
 # ---------------------------------------------------------------------------
 # Multi-Tenant Core Configuration Directory Prep
-# ---------------------------------------------------------------------------
-
-prep_directories = run(
-    "prep_directories",
-    """
-sudo mkdir -p /etc/opendkim/keys
-sudo mkdir -p /run/opendkim
-sudo touch /etc/dovecot/users /etc/opendkim/TrustedHosts /etc/opendkim/KeyTable /etc/opendkim/SigningTable
-"""
-)
+# ----------------------------------------------------------------------------------------------------------------------
 
 cleanup_domain = run(
     "cleanup_domain",
-    f"""
+    """
 set -e
 
-sudo sed -i '/^{DOMAIN_USER}:/d' /etc/dovecot/users
-
-sudo sed -i '\\|mail._domainkey.{TARGET_DOMAIN}|d' /etc/opendkim/KeyTable
-
-sudo sed -i '\\|\\*@{TARGET_DOMAIN}|d' /etc/opendkim/SigningTable
-
-sudo sed -i '\\|^{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
-sudo sed -i '\\|^\\*.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
-sudo sed -i '\\|^mail.{TARGET_DOMAIN}$|d' /etc/opendkim/TrustedHosts
-
-sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}
-
-sudo systemctl stop opendkim || true
+sudo mkdir -p /etc/opendkim
+sudo touch /etc/opendkim/TrustedHosts
+sudo touch /etc/opendkim/KeyTable
+sudo touch /etc/opendkim/SigningTable
 """,
-    deps=[prep_directories],
     trigger_values=[TARGET_DOMAIN],
-)
-
-# ---------------------------------------------------------------------------
-# Additive System Mutations (Appends dynamically instead of overwriting)
-# ---------------------------------------------------------------------------
-
-dovecot_line = f"{DOMAIN_USER}:{{PLAIN}}{DOMAIN_PASSWORD}"
-
-write_dovecot_users = run(
-    "write_dovecot_users",
-    f"""
-sudo sed -i '/^{DOMAIN_USER}:/d' /etc/dovecot/users
-printf '%s\n' '{dovecot_line}' | sudo tee -a /etc/dovecot/users > /dev/null
-sudo chmod 644 /etc/dovecot/users
-""",
-    deps=[cleanup_domain],
-    trigger_values=[dovecot_line]
 )
 
 # ---------------------------------------------------------------------------
@@ -193,10 +112,7 @@ sudo sed -i -e '$a\\' /etc/opendkim/TrustedHosts
 
 for host in hosts_to_add:
     trusted_hosts_script += f"""
-# Remove duplicate entry if it exists
-sudo sed -i '\\|^{host}$|d' /etc/opendkim/TrustedHosts
-
-# Add the host back once
+grep -qxF "{host}" /etc/opendkim/TrustedHosts || \
 echo "{host}" | sudo tee -a /etc/opendkim/TrustedHosts >/dev/null
 """
 
@@ -212,8 +128,10 @@ keytable_line = f"mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/open
 write_keytable = run(
     "write_keytable",
     f"""
-sudo sed -i '\\|^mail._domainkey.{TARGET_DOMAIN} |d' /etc/opendkim/KeyTable
-echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable > /dev/null
+sudo touch /etc/opendkim/KeyTable
+
+grep -qxF "{keytable_line}" /etc/opendkim/KeyTable || \
+echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable >/dev/null
 """,
     deps=[cleanup_domain],
     trigger_values=[keytable_line]
@@ -224,54 +142,15 @@ signingtable_line = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}"
 write_signingtable = run(
     "write_signingtable",
     f"""
-sudo sed -i '\\|^\\*@{TARGET_DOMAIN} |d' /etc/opendkim/SigningTable
-echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable > /dev/null
+sudo touch /etc/opendkim/SigningTable
+
+grep -qxF "{signingtable_line}" /etc/opendkim/SigningTable || \
+echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable >/dev/null
 """,
     deps=[cleanup_domain],
     trigger_values=[signingtable_line]
 )
 
-# ---------------------------------------------------------------------------
-# Global OpenDKIM Master File Structure Setups
-# ---------------------------------------------------------------------------
-
-global_opendkim_conf = f"""
-Syslog yes
-LogWhy yes
-UMask 007
-Canonicalization relaxed/relaxed
-Mode sv
-Socket inet:8891@127.0.0.1
-UserID opendkim
-PidFile /run/opendkim/opendkim.pid
-KeyTable refile:/etc/opendkim/KeyTable
-SigningTable refile:/etc/opendkim/SigningTable
-ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
-InternalHosts refile:/etc/opendkim/TrustedHosts
-""".strip()
-
-encoded_conf = base64.b64encode(global_opendkim_conf.encode()).decode()
-
-write_opendkim_conf = run(
-    "write_opendkim_conf",
-    f"""
-echo '{encoded_conf}' | base64 -d | sudo tee /etc/opendkim.conf > /dev/null
-sudo chmod 644 /etc/opendkim.conf
-""",
-    deps=[write_keytable, write_signingtable, write_trustedhosts]
-)
-
-configure_postfix_milter = run(
-    "configure_postfix_milter",
-    """
-sudo postconf -e "milter_protocol = 6"
-sudo postconf -e "milter_default_action = accept"
-sudo postconf -e "smtpd_milters = inet:127.0.0.1:8891"
-sudo postconf -e "non_smtpd_milters = inet:127.0.0.1:8891"
-sudo systemctl restart postfix
-""",
-    deps=[write_opendkim_conf],
-)
 
 # ---------------------------------------------------------------------------
 # DKIM Key pair Isolation Factory (Modified to support forced wipe)
@@ -344,10 +223,7 @@ def update_mx_record(secret, domain, name, target_mail):
     print(f"GoDaddy Sync -> {domain} MX {name}: Status {response.status_code}")
     response.raise_for_status()
 
-pulumi.export(
-    "mail_users",
-    {TARGET_DOMAIN: {"username": DOMAIN_USER, "password": DOMAIN_PASSWORD}},
-)
+
 
 # ---------------------------------------------------------------------------
 # Isolated External DNS Propagation Phase
@@ -391,7 +267,7 @@ def update_dns(secret, dkim_text):
     update_record(secret, ROOT_DOMAIN, "A", fix_name("mail"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("*"), VPS_IP)
     update_mx_record(secret, ROOT_DOMAIN, fix_name("@"), f"mail.{TARGET_DOMAIN}")
-    
+
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
     update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
@@ -430,9 +306,6 @@ sudo find /etc/opendkim/keys -type d -exec chmod 750 {{}} \\;
 sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {{}} \\;
 sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {{}} \\;
 
-echo "Reloading systemd..."
-sudo systemctl daemon-reload
-
 echo "Starting OpenDKIM..."
 sudo systemctl start opendkim
 
@@ -445,10 +318,6 @@ echo "Checking DKIM key exists..."
 sudo test -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 
 echo "Testing OpenDKIM..."
-
-
-echo "Restarting Dovecot..."
-sudo systemctl restart dovecot
 
 sleep 2
 
@@ -467,12 +336,9 @@ echo "=============================="
 echo "DKIM verification completed."
 """,
     deps=[
-        write_dovecot_users,
         write_trustedhosts,
         write_keytable,
         write_signingtable,
-        write_opendkim_conf,
-        configure_postfix_milter,
         generate_dkim,
     ],
     trigger_values=[
