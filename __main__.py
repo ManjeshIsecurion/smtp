@@ -19,7 +19,7 @@ GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
 # Server & Domain Config
 # ---------------------------------------------------------------------------
 
-VPS_IP = "51.79.63.247"
+VPS_IP = "148.113.195.202"
 
 ROOT_DOMAIN = cfg.require("domain")
 TARGET_DOMAIN = cfg.require("fqdn")
