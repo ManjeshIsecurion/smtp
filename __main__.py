@@ -322,7 +322,7 @@ echo "Testing OpenDKIM..."
 sleep 2
 
 echo "Configuring relayhost..."
-sudo postconf -e "relayhost=[10.0.0.2]:25"
+sudo postconf -e "relayhost=[10.10.0.2]:25"
 
 echo "Starting Postfix..."
 sudo systemctl start postfix
