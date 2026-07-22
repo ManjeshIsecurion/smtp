@@ -290,20 +290,22 @@ reload_daemons = run(
     f"""
 set -e
 
-echo "Preparing OpenDKIM directories..."
+echo "=============================="
+echo "Preparing OpenDKIM..."
+echo "=============================="
 
 sudo mkdir -p /run/opendkim
 
 sudo chown -R opendkim:opendkim /etc/opendkim
-sudo chown -R opendkim:opendkim /run/opendkim
 sudo chown -R opendkim:opendkim /etc/opendkim/keys
+sudo chown -R opendkim:opendkim /run/opendkim
 
-sudo chmod 750 /run/opendkim
 sudo chmod 750 /etc/opendkim
+sudo chmod 750 /run/opendkim
 
 sudo find /etc/opendkim/keys -type d -exec chmod 750 {{}} \\;
-sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {{}} \\;
 sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {{}} \\;
+sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {{}} \\;
 
 echo "Checking DKIM key..."
 
@@ -313,24 +315,37 @@ echo "Configuring relayhost..."
 
 sudo postconf -e "relayhost=[10.10.0.2]:25"
 
-echo "Reloading OpenDKIM..."
+echo "Restarting OpenDKIM..."
 
-sudo systemctl reload opendkim || sudo systemctl restart opendkim
+sudo systemctl restart opendkim
 
-echo "Reloading Postfix..."
-
-sudo postfix reload
-
-echo "Waiting for Postfix..."
+echo "Waiting for OpenDKIM..."
 
 for i in $(seq 1 10); do
+    if systemctl is-active --quiet opendkim; then
+        echo "OpenDKIM is ready."
+        break
+    fi
+    sleep 1
+done
+
+systemctl is-active --quiet opendkim
+
+echo "Restarting Postfix..."
+
+sudo systemctl restart postfix
+
+echo "Waiting for Postfix (587)..."
+
+for i in $(seq 1 20); do
     if nc -z 127.0.0.1 587; then
         echo "Postfix is ready."
         break
     fi
-
     sleep 1
 done
+
+nc -z 127.0.0.1 587
 
 echo ""
 echo "=============================="
@@ -340,7 +355,6 @@ echo "Dovecot  : $(systemctl is-active dovecot)"
 echo "=============================="
 
 echo "Configuration completed successfully."
-
 """,
     deps=[
         write_trustedhosts,
@@ -353,7 +367,7 @@ echo "Configuration completed successfully."
     ],
 )
 
-# ---------------------------------------------------------------------------
+#---------------------------------------------------------------------------
 # Terminal Control Interface Exports
 # ---------------------------------------------------------------------------
 
