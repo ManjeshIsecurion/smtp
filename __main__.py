@@ -123,32 +123,55 @@ write_trustedhosts = run(
     trigger_values=[TARGET_DOMAIN],
 )
 
-# 3. Append KeyTable Safely
-keytable_line = f"mail._domainkey.{TARGET_DOMAIN} {TARGET_DOMAIN}:mail:/etc/opendkim/keys/{TARGET_DOMAIN}/mail.private"
+# ---------------------------------------------------------------------------
+# 3. Update KeyTable (Replace existing entry if present)
+# ---------------------------------------------------------------------------
+
+keytable_line = (
+    f"mail._domainkey.{TARGET_DOMAIN} "
+    f"{TARGET_DOMAIN}:mail:/etc/opendkim/keys/{TARGET_DOMAIN}/mail.private"
+)
+
 write_keytable = run(
     "write_keytable",
     f"""
+set -e
+
 sudo touch /etc/opendkim/KeyTable
 
-grep -qxF "{keytable_line}" /etc/opendkim/KeyTable || \
+# Remove any existing entry for this domain
+sudo sed -i '\\|mail._domainkey.{TARGET_DOMAIN}|d' /etc/opendkim/KeyTable
+
+# Add fresh entry
 echo "{keytable_line}" | sudo tee -a /etc/opendkim/KeyTable >/dev/null
 """,
     deps=[cleanup_domain],
-    trigger_values=[keytable_line]
+    trigger_values=[TARGET_DOMAIN],
 )
 
-# 4. Append SigningTable Safely
-signingtable_line = f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}"
+# ---------------------------------------------------------------------------
+# 4. Update SigningTable (Replace existing entry if present)
+# ---------------------------------------------------------------------------
+
+signingtable_line = (
+    f"*@{TARGET_DOMAIN} mail._domainkey.{TARGET_DOMAIN}"
+)
+
 write_signingtable = run(
     "write_signingtable",
     f"""
+set -e
+
 sudo touch /etc/opendkim/SigningTable
 
-grep -qxF "{signingtable_line}" /etc/opendkim/SigningTable || \
+# Remove previous mapping
+sudo sed -i '\\|{TARGET_DOMAIN}|d' /etc/opendkim/SigningTable
+
+# Add new mapping
 echo "{signingtable_line}" | sudo tee -a /etc/opendkim/SigningTable >/dev/null
 """,
     deps=[cleanup_domain],
-    trigger_values=[signingtable_line]
+    trigger_values=[TARGET_DOMAIN],
 )
 
 
@@ -162,7 +185,15 @@ purge_keys_cmd = ""
 dkim_command = f"""
 set -e
 
+echo "Removing previous DKIM key..."
+
+sudo rm -rf /etc/opendkim/keys/{TARGET_DOMAIN}
+
+echo "Creating key directory..."
+
 sudo mkdir -p /etc/opendkim/keys/{TARGET_DOMAIN}
+
+echo "Generating new DKIM key..."
 
 sudo opendkim-genkey \
     -b 2048 \
@@ -230,6 +261,7 @@ def update_mx_record(secret, domain, name, target_mail):
 # ---------------------------------------------------------------------------
 
 def update_dns(secret, dkim_text):
+
     if '; -----' in dkim_text:
         dkim_text = dkim_text.split('; -----')[0]
     elif ';' in dkim_text:
@@ -251,29 +283,69 @@ def update_dns(secret, dkim_text):
         raise Exception(f"Unable to parse DKIM for {TARGET_DOMAIN}")
 
     public_key = match.group(1)
+
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
 
     def fix_name(record_name):
         if not SUBDOMAIN_PREFIX:
             return record_name
+
         if record_name == "@":
             return SUBDOMAIN_PREFIX
+
         if record_name == "*":
             return f"*.{SUBDOMAIN_PREFIX}"
+
         return f"{record_name}.{SUBDOMAIN_PREFIX}"
 
-    # Overwrite/refresh records entirely on GoDaddy
+    print("Updating DNS records...")
+
     update_record(secret, ROOT_DOMAIN, "A", fix_name("@"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("mail"), VPS_IP)
     update_record(secret, ROOT_DOMAIN, "A", fix_name("*"), VPS_IP)
-    update_mx_record(secret, ROOT_DOMAIN, fix_name("@"), f"mail.{TARGET_DOMAIN}")
 
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("@"), f"v=spf1 mx ip4:{VPS_IP} -all")
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("_dmarc"), f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}")
-    update_record(secret, ROOT_DOMAIN, "TXT", fix_name("mail._domainkey"), dkim_value)
+    update_mx_record(
+        secret,
+        ROOT_DOMAIN,
+        fix_name("@"),
+        f"mail.{TARGET_DOMAIN}",
+    )
+
+    update_record(
+        secret,
+        ROOT_DOMAIN,
+        "TXT",
+        fix_name("@"),
+        f"v=spf1 mx ip4:{VPS_IP} -all",
+    )
+
+    update_record(
+        secret,
+        ROOT_DOMAIN,
+        "TXT",
+        fix_name("_dmarc"),
+        f"v=DMARC1; p=reject; adkim=s; aspf=s; rua=mailto:dmarc@{TARGET_DOMAIN}",
+    )
+
+    update_record(
+        secret,
+        ROOT_DOMAIN,
+        "TXT",
+        fix_name("mail._domainkey"),
+        dkim_value,
+    )
+
+    print("Waiting for authoritative DNS...")
+
     wait_for_dkim(TARGET_DOMAIN)
 
-    return f"Successfully established independent sub-routing maps for {TARGET_DOMAIN}"
+    print("Waiting 60 seconds for global propagation...")
+
+    time.sleep(60)
+
+    print("DNS propagation completed.")
+
+    return f"Successfully configured {TARGET_DOMAIN}"
 
 update_dns_records = pulumi.Output.all(
     GODADDY_API_SECRET,
