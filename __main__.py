@@ -290,56 +290,57 @@ reload_daemons = run(
     f"""
 set -e
 
-echo "Stopping services..."
-sudo systemctl stop postfix || true
-sudo systemctl stop opendkim || true
+echo "Preparing OpenDKIM directories..."
 
-echo "Preparing directories..."
 sudo mkdir -p /run/opendkim
-sudo chown -R opendkim:opendkim /etc/opendkim /run/opendkim
+
+sudo chown -R opendkim:opendkim /etc/opendkim
+sudo chown -R opendkim:opendkim /run/opendkim
+sudo chown -R opendkim:opendkim /etc/opendkim/keys
+
 sudo chmod 750 /run/opendkim
 sudo chmod 750 /etc/opendkim
-
-sudo chown -R opendkim:opendkim /etc/opendkim/keys
 
 sudo find /etc/opendkim/keys -type d -exec chmod 750 {{}} \\;
 sudo find /etc/opendkim/keys -type f -name "*.txt" -exec chmod 644 {{}} \\;
 sudo find /etc/opendkim/keys -type f -name "*.private" -exec chmod 600 {{}} \\;
 
-echo "Starting OpenDKIM..."
-sudo systemctl start opendkim
-
-sleep 5
-
-sudo systemctl is-active --quiet opendkim
-
-echo "Checking DKIM key exists..."
+echo "Checking DKIM key..."
 
 sudo test -f /etc/opendkim/keys/{TARGET_DOMAIN}/mail.private
 
-echo "Testing OpenDKIM..."
-
-sleep 2
-
 echo "Configuring relayhost..."
+
 sudo postconf -e "relayhost=[10.10.0.2]:25"
 
-echo "Starting Postfix..."
-sudo systemctl start postfix
+echo "Reloading OpenDKIM..."
 
-sleep 2
+sudo systemctl reload opendkim || sudo systemctl restart opendkim
 
 echo "Reloading Postfix..."
+
 sudo postfix reload
+
+echo "Waiting for Postfix..."
+
+for i in $(seq 1 10); do
+    if nc -z 127.0.0.1 587; then
+        echo "Postfix is ready."
+        break
+    fi
+
+    sleep 1
+done
 
 echo ""
 echo "=============================="
-echo "OpenDKIM : $(sudo systemctl is-active opendkim)"
-echo "Postfix  : $(sudo systemctl is-active postfix)"
-echo "Dovecot  : $(sudo systemctl is-active dovecot)"
+echo "OpenDKIM : $(systemctl is-active opendkim)"
+echo "Postfix  : $(systemctl is-active postfix)"
+echo "Dovecot  : $(systemctl is-active dovecot)"
 echo "=============================="
 
-echo "DKIM verification completed."
+echo "Configuration completed successfully."
+
 """,
     deps=[
         write_trustedhosts,
