@@ -35,7 +35,7 @@ SAFE_DOMAIN = TARGET_DOMAIN.replace(".", "_").replace("-", "_")
 
 # Extract local system naming components
 root_user = re.sub(r"\..*$", "", ROOT_DOMAIN)
-DOMAIN_USER = f"{SUBDOMAIN_PREFIX}-{root_user}" if SUBDOMAIN_PREFIX else root_user
+DOMAIN_USER = f"{SUBDOMAIN_PREFIX}"
 
 PASSWORD_FILE = os.path.join(os.path.dirname(__file__), "mail-passwords.txt")
 
