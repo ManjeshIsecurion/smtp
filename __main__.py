@@ -25,10 +25,7 @@ VPS_IP = "51.79.63.247"
 ROOT_DOMAIN = cfg.require("domain")
 SUBDOMAIN_PREFIX = cfg.require("fqdn")
 
-if SUBDOMAIN_PREFIX == "":
-    TARGET_DOMAIN = ROOT_DOMAIN
-else:
-    TARGET_DOMAIN = f"{SUBDOMAIN_PREFIX}.{ROOT_DOMAIN}"
+TARGET_DOMAIN = f"{SUBDOMAIN_PREFIX}"
 
 # Safe string to make Pulumi resource names globally unique per domain
 SAFE_DOMAIN = TARGET_DOMAIN.replace(".", "_").replace("-", "_")
