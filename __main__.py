@@ -23,9 +23,9 @@ GODADDY_API_SECRET = cfg.require_secret("godaddyApiSecret")
 
 VPS_IP = "51.79.63.247"
 ROOT_DOMAIN = cfg.require("domain")
-SUBDOMAIN_PREFIX = cfg.require("fqdn")
-
-TARGET_DOMAIN = f"{SUBDOMAIN_PREFIX}"
+SUBDOMAIN_PREFIX = cfg.require("subdomain")
+FOLDER_NAME = cfg.require("fqdn")
+TARGET_DOMAIN = f"{FOLDER_NAME}"
 
 # Safe string to make Pulumi resource names globally unique per domain
 SAFE_DOMAIN = TARGET_DOMAIN.replace(".", "_").replace("-", "_")
