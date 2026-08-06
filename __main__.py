@@ -13,7 +13,7 @@ cfg = pulumi.Config()
 # Domain Configuration
 # ---------------------------------------------------------------------------
 
-DOMAIN = "news.sample-now.in"
+DOMAIN = "east.sample-now.in"
 
 SELECTOR = "default"
 
