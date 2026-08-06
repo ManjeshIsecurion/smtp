@@ -13,11 +13,9 @@ cfg = pulumi.Config()
 # Domain Configuration
 # ---------------------------------------------------------------------------
 
-DOMAIN = "east.sample-now.in"
-
-SELECTOR = "s20260806"
-
-ROOT_DOMAIN = "sample-now.in"
+DOMAIN = cfg.require("fqdn").strip().lower()
+ROOT_DOMAIN = cfg.require("domain").strip().lower()
+SELECTOR = cfg.get("selector") or "default"
 # ---------------------------------------------------------------------------
 # SMTP Server
 # ---------------------------------------------------------------------------
