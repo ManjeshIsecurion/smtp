@@ -32,6 +32,8 @@ SERVER_HOSTNAME = "blog.etmoney.co.in"
 
 SMTP_IP = "51.79.63.247"
 
+KUBERNETES_POD_CIDR = "10.42.0.0/16"
+
 # ---------------------------------------------------------------------------
 # GoDaddy Credentials
 # ---------------------------------------------------------------------------
@@ -163,6 +165,10 @@ echo "{SMTP_IP}" | sudo tee -a "{TRUSTED_HOSTS}" >/dev/null
 sudo grep -qxF "{SERVER_HOSTNAME}" "{TRUSTED_HOSTS}" || \
 echo "{SERVER_HOSTNAME}" | sudo tee -a "{TRUSTED_HOSTS}" >/dev/null
 
+# Kubernetes Worker Pod network
+sudo grep -qxF "{KUBERNETES_POD_CIDR}" "{TRUSTED_HOSTS}" || \
+echo "{KUBERNETES_POD_CIDR}" | sudo tee -a "{TRUSTED_HOSTS}" >/dev/null
+
 echo ""
 echo "Current TrustedHosts:"
 sudo cat "{TRUSTED_HOSTS}"
@@ -177,6 +183,7 @@ echo "======================================="
         DOMAIN,
         SMTP_IP,
         SERVER_HOSTNAME,
+        KUBERNETES_POD_CIDR,
         "trusted-hosts-v2",
     ],
 )
@@ -348,6 +355,27 @@ echo "OpenDKIM is running."
 echo ""
 echo "Restarting Postfix..."
 
+# Send directly to recipient MX servers.
+# Do not relay back into this same Postfix instance.
+sudo postconf -e 'relayhost ='
+
+# Force outbound mail to use the redirector/sending IP.
+sudo postconf -e 'smtp_bind_address = {SMTP_IP}'
+
+# Keep signed message content unchanged after OpenDKIM signs it.
+sudo postconf -e 'smtp_header_checks ='
+sudo postconf -e 'smtp_mime_header_checks ='
+sudo postconf -e 'smtp_nested_header_checks ='
+sudo postconf -e 'smtp_body_checks ='
+sudo postconf -e 'smtp_generic_maps ='
+sudo postconf -e 'sender_canonical_maps ='
+sudo postconf -e 'recipient_canonical_maps ='
+sudo postconf -e 'canonical_maps ='
+sudo postconf -e 'masquerade_domains ='
+sudo postconf -e 'remote_header_rewrite_domain ='
+
+sudo postfix check
+
 sudo systemctl restart postfix
 
 sleep 3
@@ -380,6 +408,8 @@ echo "=============================="
     trigger_values=[
         DOMAIN,
         SELECTOR,
+        SMTP_IP,
+        "postfix-direct-routing-v1"
     ],
 )
 
