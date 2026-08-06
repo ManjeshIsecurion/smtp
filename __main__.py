@@ -13,9 +13,17 @@ cfg = pulumi.Config()
 # Domain Configuration
 # ---------------------------------------------------------------------------
 
-DOMAIN = cfg.require("fqdn").strip().lower()
+# ---------------------------------------------------------------------------
+# Domain Configuration
+# ---------------------------------------------------------------------------
+
 ROOT_DOMAIN = cfg.require("domain").strip().lower()
-SELECTOR = cfg.get("selector") or "default"
+DOMAIN = cfg.require("fqdn").strip().lower()
+
+SELECTOR = (
+    cfg.get("selector")
+    or "default"
+).strip().lower()
 # ---------------------------------------------------------------------------
 # SMTP Server
 # ---------------------------------------------------------------------------
@@ -216,6 +224,8 @@ echo "======================================="
     ],
     trigger_values=[
         DOMAIN,
+        SELECTOR,
+        PRIVATE_KEY,
     ],
 )
 
@@ -262,6 +272,7 @@ echo "======================================="
     ],
     trigger_values=[
         DOMAIN,
+        SELECTOR,
     ],
 )
 
@@ -368,6 +379,7 @@ echo "=============================="
     ],
     trigger_values=[
         DOMAIN,
+        SELECTOR,
     ],
 )
 
