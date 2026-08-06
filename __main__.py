@@ -15,7 +15,7 @@ cfg = pulumi.Config()
 
 DOMAIN = "east.sample-now.in"
 
-SELECTOR = "default"
+SELECTOR = "s20260806"
 
 ROOT_DOMAIN = "sample-now.in"
 # ---------------------------------------------------------------------------
